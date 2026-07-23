@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<modDesc descVersion="93">
+    <author>scfmod</author>
+    <version>0.1.0.0</version>
+    <title>
+        <en>What Am I Looking At?</en>
+        <de>What Am I Looking At?</de>
+    </title>
+    <description>
+        <en>Developer HUD for inspecting terrain, foliage, vehicles, trees, logs and physics objects.</en>
+        <de>Entwickler-HUD zum Untersuchen von Terrain, Bewuchs, Fahrzeugen, Bäumen, Stämmen und Physikobjekten.</de>
+    </description>
+    <multiplayer supported="true"/>
+
+    <extraSourceFiles>
+        <sourceFile filename="scripts/WailaUtil.lua" />
+        <sourceFile filename="scripts/WailaRaycaster.lua" />
+        <sourceFile filename="scripts/inspectors/WailaTerrainInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaFoliageInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaObjectInspector.lua" />
+        <sourceFile filename="scripts/WailaDebugDump.lua" />
+        <sourceFile filename="scripts/WailaHud.lua" />
+        <sourceFile filename="scripts/FS25WhatAmILookingAt.lua" />
+    </extraSourceFiles>
+
+    <actions>
+        <action name="WAILA_TOGGLE_HUD" axisType="HALF" category="ONFOOT"/>
+        <action name="WAILA_DUMP_TARGET" axisType="HALF" category="ONFOOT"/>
+    </actions>
+
+    <inputBinding>
+        <actionBinding action="WAILA_TOGGLE_HUD">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_m" index="1" />
+        </actionBinding>
+        <actionBinding action="WAILA_DUMP_TARGET">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_j" index="1" />
+        </actionBinding>
+    </inputBinding>
+
+    <l10n>
+        <text name="input_WAILA_TOGGLE_HUD">
+            <en>Toggle world inspector</en>
+            <de>Weltinspektor umschalten</de>
+        </text>
+        <text name="input_WAILA_DUMP_TARGET">
+            <en>Dump inspected target</en>
+            <de>Untersuchtes Ziel ausgeben</de>
+        </text>
+    </l10n>
+</modDesc>
