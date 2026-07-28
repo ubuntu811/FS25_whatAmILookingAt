@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" standalone="no" ?>
 <modDesc descVersion="93">
-    <author>scfmod</author>
+    <author>me</author>
     <version>0.1.0.0</version>
     <title>
         <en>What Am I Looking At?</en>
@@ -12,12 +12,15 @@
     </description>
     <multiplayer supported="true"/>
 
+    <iconFilename>icon.dds</iconFilename>
+
     <extraSourceFiles>
         <sourceFile filename="scripts/WailaUtil.lua" />
         <sourceFile filename="scripts/WailaRaycaster.lua" />
         <sourceFile filename="scripts/inspectors/WailaTerrainInspector.lua" />
         <sourceFile filename="scripts/inspectors/WailaFoliageInspector.lua" />
         <sourceFile filename="scripts/inspectors/WailaObjectInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaVehicleInspector.lua" />
         <sourceFile filename="scripts/WailaDebugDump.lua" />
         <sourceFile filename="scripts/WailaHud.lua" />
         <sourceFile filename="scripts/FS25WhatAmILookingAt.lua" />
@@ -26,6 +29,7 @@
     <actions>
         <action name="WAILA_TOGGLE_HUD" axisType="HALF" category="ONFOOT"/>
         <action name="WAILA_DUMP_TARGET" axisType="HALF" category="ONFOOT"/>
+        <action name="WAILA_DUMP_FOLIAGE_CATALOG" axisType="HALF" category="ONFOOT"/>
     </actions>
 
     <inputBinding>
@@ -34,6 +38,9 @@
         </actionBinding>
         <actionBinding action="WAILA_DUMP_TARGET">
             <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_j" index="1" />
+        </actionBinding>
+        <actionBinding action="WAILA_DUMP_FOLIAGE_CATALOG">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_k" index="1" />
         </actionBinding>
     </inputBinding>
 
@@ -45,6 +52,10 @@
         <text name="input_WAILA_DUMP_TARGET">
             <en>Dump inspected target</en>
             <de>Untersuchtes Ziel ausgeben</de>
+        </text>
+        <text name="input_WAILA_DUMP_FOLIAGE_CATALOG">
+            <en>Dump foliage catalog for this map</en>
+            <de>Bewuchskatalog dieser Karte ausgeben</de>
         </text>
     </l10n>
 </modDesc>

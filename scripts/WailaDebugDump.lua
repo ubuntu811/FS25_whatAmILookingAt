@@ -37,9 +37,52 @@ function WailaDebugDump.dump(inspection)
         end
     end
 
+    if inspection.vehicle ~= nil then
+        for key, value in pairs(inspection.vehicle) do
+            log("vehicle.%s = %s (%s)", tostring(key), tostring(value), type(value))
+        end
+    end
+
     if inspection.terrain ~= nil then
         for key, value in pairs(inspection.terrain) do
             log("terrain.%s = %s", tostring(key), tostring(value))
+        end
+    end
+
+    log("------------------------------------------------------------")
+end
+
+function WailaDebugDump.dumpFoliageCatalog(layers, writableLayers)
+    if layers == nil then
+        log("Foliage catalog unavailable (map I3D not loaded yet)")
+        return
+    end
+
+    log("------------------------------------------------------------")
+    log("FOLIAGE CATALOG (%d multilayers)", #layers)
+
+    for _, layer in ipairs(layers) do
+        log("Layer %d  densityMapId=%s plane=%s typeChannels=%s",
+            layer.layerIndex, tostring(layer.densityMapId), tostring(layer.terrainDataPlaneId), tostring(layer.numTypeIndexChannels))
+
+        for _, foliageType in ipairs(layer.types) do
+            log("  [%d] %-20s (%s)", foliageType.typeIndex, foliageType.name, foliageType.kind)
+        end
+    end
+
+    log("------------------------------------------------------------")
+    log("WRITABLE DECO LAYERS (what applyDecoFoliage actually accepts - independent of the map I3D types above)")
+
+    if writableLayers == nil then
+        log("  unavailable (foliageSystem not loaded yet)")
+    else
+        log("  decoFoliages:")
+        for _, name in ipairs(writableLayers.decoFoliages) do
+            log("    %s", name)
+        end
+        log("  paintableFoliages:")
+        for _, name in ipairs(writableLayers.paintableFoliages) do
+            log("    %s", name)
         end
     end
 

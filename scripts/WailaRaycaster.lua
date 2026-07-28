@@ -10,7 +10,7 @@ end
 
 function WailaRaycaster:getCollisionMask()
     local mask = 0
-    local names = {"DEFAULT", "TERRAIN", "TREE", "VEHICLE", "STATIC_WORLD", "DYNAMIC_OBJECT"}
+    local names = {"DEFAULT", "TERRAIN", "TREE", "VEHICLE", "VEHICLE_FORK", "STATIC_OBJECT", "DYNAMIC_OBJECT", "BUILDING", "ROAD", "ANIMAL"}
 
     for _, name in ipairs(names) do
         if CollisionFlag ~= nil and CollisionFlag[name] ~= nil then

@@ -10,8 +10,12 @@ local function getWorldPosition(nodeId)
         return nil
     end
 
-    local x, y, z = WailaUtil.safeGlobalCall("getWorldTranslation", nil, nodeId)
-    if x == nil then
+    if getWorldTranslation == nil then
+        return nil
+    end
+
+    local ok, x, y, z = pcall(getWorldTranslation, nodeId)
+    if not ok or x == nil or y == nil or z == nil then
         return nil
     end
 

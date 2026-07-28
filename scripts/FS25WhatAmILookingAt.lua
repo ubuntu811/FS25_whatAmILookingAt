@@ -10,9 +10,10 @@ function FS25WhatAmILookingAt:loadMap()
     self.terrainInspector = WailaTerrainInspector.new()
     self.foliageInspector = WailaFoliageInspector.new()
     self.objectInspector = WailaObjectInspector.new()
+    self.vehicleInspector = WailaVehicleInspector.new()
     self.hud = WailaHud.new()
 
-    self.areaSize = 10
+    self.areaSize = 5
     self.areaStep = 0.5
     self.pointIntervalMs = 100
     self.areaIntervalMs = 400
@@ -51,6 +52,17 @@ function FS25WhatAmILookingAt:registerActionEvents()
         g_inputBinding:setActionEventTextPriority(dumpId, GS_PRIO_LOW)
         g_inputBinding:setActionEventTextVisibility(dumpId, false)
     end
+
+    local _, catalogId = g_inputBinding:registerActionEvent(
+        InputAction.WAILA_DUMP_FOLIAGE_CATALOG,
+        self,
+        self.onDumpFoliageCatalog,
+        false, true, false, true, nil, true
+    )
+    if catalogId ~= nil then
+        g_inputBinding:setActionEventTextPriority(catalogId, GS_PRIO_LOW)
+        g_inputBinding:setActionEventTextVisibility(catalogId, false)
+    end
 end
 
 function FS25WhatAmILookingAt:onToggleHud()
@@ -65,6 +77,13 @@ function FS25WhatAmILookingAt:onDumpTarget()
     if self.enabled then
         WailaDebugDump.dump(self.current)
     end
+end
+
+function FS25WhatAmILookingAt:onDumpFoliageCatalog()
+    WailaDebugDump.dumpFoliageCatalog(
+        self.foliageInspector:listAvailableFoliage(),
+        self.foliageInspector:listWritableDecoLayers()
+    )
 end
 
 function FS25WhatAmILookingAt:update(dt)
@@ -104,11 +123,24 @@ function FS25WhatAmILookingAt:updatePointInspection()
     self.current = self.current or {}
     self.current.hit = hit
     self.current.object = self.objectInspector:inspect(hit)
-    self.current.terrain = self.terrainInspector:inspectPoint(hit.x, hit.y, hit.z)
-    self.current.foliagePoint = self.foliageInspector:inspectPoint(hit.x, hit.z)
+    self.current.vehicle = self.vehicleInspector:inspect(hit, self.current.object)
+
+    if self.current.vehicle == nil then
+        self.current.terrain = self.terrainInspector:inspectPoint(hit.x, hit.y, hit.z)
+        self.current.foliagePoint = self.foliageInspector:inspectPoint(hit.x, hit.z)
+    else
+        self.current.terrain = nil
+        self.current.foliagePoint = nil
+        self.current.terrainArea = nil
+        self.current.foliageArea = nil
+    end
 end
 
 function FS25WhatAmILookingAt:updateAreaInspection(x, z)
+    if self.current.vehicle ~= nil then
+        return
+    end
+
     self.current.terrainArea = self.terrainInspector:scanArea(x, z, self.areaSize, self.areaStep)
     self.current.foliageArea = self.foliageInspector:scanArea(x, z, self.areaSize, self.areaStep)
 end
