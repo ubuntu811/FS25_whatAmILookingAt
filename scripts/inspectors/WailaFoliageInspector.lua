@@ -216,6 +216,34 @@ function WailaFoliageInspector:listWritableDecoLayers()
     }
 end
 
+-- grassShort passes getIsDecoLayerDefined but was never in decoFoliages/
+-- paintableFoliages when dumped above - meaning either it's checked
+-- against something else on foliageSystem entirely, or there's a third
+-- registry never looked at. Raw field dump instead of guessing further:
+-- every top-level key on foliageSystem and its type, so anything relevant
+-- actually shows up instead of staying invisible.
+function WailaFoliageInspector:listFoliageSystemFields()
+    local foliageSystem = g_currentMission ~= nil and g_currentMission.foliageSystem or nil
+
+    if foliageSystem == nil then
+        return nil
+    end
+
+    local fields = {}
+
+    for key, value in pairs(foliageSystem) do
+        table.insert(fields, {
+            name = tostring(key),
+            valueType = type(value),
+            length = type(value) == "table" and #value or nil,
+        })
+    end
+
+    table.sort(fields, function(a, b) return a.name < b.name end)
+
+    return fields
+end
+
 -- ------------------------------------------------------------
 -- Public: what's under the crosshair right now
 -- ------------------------------------------------------------

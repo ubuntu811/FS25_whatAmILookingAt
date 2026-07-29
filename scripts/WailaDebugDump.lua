@@ -52,7 +52,7 @@ function WailaDebugDump.dump(inspection)
     log("------------------------------------------------------------")
 end
 
-function WailaDebugDump.dumpFoliageCatalog(layers, writableLayers)
+function WailaDebugDump.dumpFoliageCatalog(layers, writableLayers, systemFields)
     if layers == nil then
         log("Foliage catalog unavailable (map I3D not loaded yet)")
         return
@@ -83,6 +83,21 @@ function WailaDebugDump.dumpFoliageCatalog(layers, writableLayers)
         log("  paintableFoliages:")
         for _, name in ipairs(writableLayers.paintableFoliages) do
             log("    %s", name)
+        end
+    end
+
+    log("------------------------------------------------------------")
+    log("RAW foliageSystem FIELDS (grassShort passes getIsDecoLayerDefined but isn't in either list above - looking for where)")
+
+    if systemFields == nil then
+        log("  unavailable (foliageSystem not loaded yet)")
+    else
+        for _, field in ipairs(systemFields) do
+            if field.length ~= nil then
+                log("  %-24s %-10s length=%d", field.name, field.valueType, field.length)
+            else
+                log("  %-24s %s", field.name, field.valueType)
+            end
         end
     end
 

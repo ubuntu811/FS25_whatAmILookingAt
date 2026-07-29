@@ -82,7 +82,8 @@ end
 function FS25WhatAmILookingAt:onDumpFoliageCatalog()
     WailaDebugDump.dumpFoliageCatalog(
         self.foliageInspector:listAvailableFoliage(),
-        self.foliageInspector:listWritableDecoLayers()
+        self.foliageInspector:listWritableDecoLayers(),
+        self.foliageInspector:listFoliageSystemFields()
     )
 end
 
