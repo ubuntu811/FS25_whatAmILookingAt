@@ -88,17 +88,40 @@ function FS25WhatAmILookingAt:onDumpFoliageCatalog()
 end
 
 function FS25WhatAmILookingAt:update(dt)
-    if not self.enabled or g_currentMission == nil or g_gui:getIsGuiVisible() then
+    if g_currentMission == nil or g_gui:getIsGuiVisible() then
         return
     end
 
+    -- dt is milliseconds here (pointIntervalMs is compared against it
+    -- directly below) - smoothed rather than raw 1000/dt, which jitters
+    -- too much frame to frame to read.
+    if dt > 0 then
+        local instantFps = 1000 / dt
+        self.fps = self.fps and (self.fps * 0.9 + instantFps * 0.1) or instantFps
+    end
+
+    -- The lightweight point raycast now runs regardless of self.enabled,
+    -- so the always-on mini HUD summary has something current to show
+    -- even with the full inspector toggled off - timed directly so we can
+    -- actually see whether that background scanning costs anything,
+    -- rather than guessing from overall FPS (which every other mod and
+    -- the base game itself also feed into). The heavier area/foliage scan
+    -- stays gated behind self.enabled below - only the full detailed view
+    -- needs it, no reason to pay for it just for a one-line summary.
     self.pointTimer = self.pointTimer - dt
-    self.areaTimer = self.areaTimer - dt
 
     if self.pointTimer <= 0 then
         self.pointTimer = self.pointIntervalMs
+        local startTime = getTimeSec()
         self:updatePointInspection()
+        self.lastScanMs = (getTimeSec() - startTime) * 1000
     end
+
+    if not self.enabled then
+        return
+    end
+
+    self.areaTimer = self.areaTimer - dt
 
     if self.current ~= nil and self.current.hit ~= nil then
         local x = self.current.hit.x
@@ -147,7 +170,16 @@ function FS25WhatAmILookingAt:updateAreaInspection(x, z)
 end
 
 function FS25WhatAmILookingAt:draw()
-    if self.enabled and not g_gui:getIsGuiVisible() then
+    if g_gui:getIsGuiVisible() then
+        return
+    end
+
+    -- Mini summary always draws, same corner regardless of whether the
+    -- full inspector is toggled on - Shift+M just decides whether the
+    -- full detailed panel slides open beneath it.
+    self.hud:drawMini(self.current, {fps = self.fps, scanMs = self.lastScanMs})
+
+    if self.enabled then
         self.hud:draw(self.current, self.areaSize, self.areaStep)
     end
 end

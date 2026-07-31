@@ -12,11 +12,74 @@ function WailaHud.new()
     self.textSize = 0.014
     self.maxStatsRows = 6
     self.maxFoliageStatsRows = 10
+
+    -- Mini summary panel - always visible, sits in the leftmost slot of
+    -- the same top-left row ImmersiveWeathering's panels use, whether or
+    -- not the full inspector is toggled on. Matches IW's own panel row
+    -- height (0.098) for visual alignment; kept narrow (0.085) since the
+    -- available band between the quickbar and the date/money bar is
+    -- shared with two IW panels and doesn't have room to spare.
+    self.miniLeft = 0.20
+    self.miniTop = 0.98
+    self.miniWidth = 0.085
+    self.miniHeight = 0.098
+    self.miniTitleSize = 0.015
+    self.miniValueSize = 0.015
+    self.miniKeybindSize = 0.0135
+
     return self
 end
 
 function WailaHud:addLine(lines, text, bold)
     table.insert(lines, {text = text, bold = bold == true})
+end
+
+-- Reads the REAL current binding for an action instead of a hardcoded
+-- guess - a player's manual rebind via the settings screen silently
+-- overrides modDesc.xml's shipped default from then on, confirmed the
+-- hard way while chasing ImmersiveWeathering's own keybind display. Same
+-- native the base game's own InputGlyphElement uses for on-screen key
+-- prompts (g_inputDisplayManager), not in scriptBinding.xml, so wrapped
+-- in pcall with a fallback.
+function WailaHud:getActionKeyLabel(actionName, fallback)
+    if g_inputDisplayManager == nil then
+        return fallback
+    end
+
+    local success, helpElement = pcall(
+        g_inputDisplayManager.getControllerSymbolOverlays,
+        g_inputDisplayManager, actionName, nil, "", true
+    )
+
+    if not success or helpElement == nil or helpElement.keys == nil or #helpElement.keys == 0 then
+        return fallback
+    end
+
+    return "[" .. table.concat(helpElement.keys, "+") .. "]"
+end
+
+-- Long vehicle names ("CLAAS XERION 12.650 SE") were overflowing straight
+-- past the mini panel's right edge into IW's panel next to it - the mini
+-- panel is only 0.085 wide by design (see miniWidth comment above), and
+-- renderText doesn't clip or wrap on its own. getTextWidth is the real
+-- base-game global (used internally for text alignment) that reports
+-- normalized width for a given size/string, so we can trim character by
+-- character until it actually fits instead of guessing a fixed cutoff
+-- length that would be wrong at every other font size or string.
+function WailaHud:truncateToWidth(text, size, maxWidth)
+    if text == nil or getTextWidth == nil or getTextWidth(size, text) <= maxWidth then
+        return text
+    end
+
+    local ellipsis = "..."
+    for length = #text - 1, 0, -1 do
+        local candidate = string.sub(text, 1, length) .. ellipsis
+        if getTextWidth(size, candidate) <= maxWidth then
+            return candidate
+        end
+    end
+
+    return ellipsis
 end
 
 function WailaHud:formatPosition(position)
@@ -31,18 +94,126 @@ function WailaHud:formatPosition(position)
     return string.format("%.2f / %.2f / %.2f", position.x, position.y, position.z)
 end
 
+local WAILA_HUD_IW_GAP = 0.01
+
+-- Short label for the always-on mini panel - vehicle name if looking at
+-- one, otherwise whatever foliage is actually at the point (a raycast
+-- only ever hits the terrain collision mesh, so "terrain" alone would be
+-- true but useless while standing in grass), otherwise the terrain
+-- material, otherwise nothing found.
+function WailaHud:getMiniSummary(inspection)
+    if inspection == nil or inspection.hit == nil then
+        return "No target"
+    end
+
+    if inspection.vehicle ~= nil then
+        return WailaUtil.value(inspection.vehicle.vehicleName)
+    end
+
+    local foliagePoint = inspection.foliagePoint or {}
+    if #foliagePoint > 0 then
+        return foliagePoint[1].name
+    end
+
+    if inspection.terrain ~= nil then
+        return inspection.terrain.materialName
+    end
+
+    return "Unknown"
+end
+
+function WailaHud:drawMini(inspection, perf)
+    if drawFilledRect == nil then
+        return
+    end
+
+    local left = self.miniLeft
+    local top = self.miniTop
+    local panelBottom = top - self.miniHeight
+
+    -- Published via g_currentMission, not a bare WailaHud global - proved
+    -- the hard way that separately-loaded mods don't actually see a new
+    -- global table one of them declares (confirmed nil from IW's side via
+    -- direct logging), even though both can freely read/write fields on
+    -- g_currentMission, which genuinely is shared engine-side state that
+    -- exists before any mod runs. Full detailed panel below docks off
+    -- these too, not off IW - mini panel is the real anchor for this row.
+    if g_currentMission ~= nil then
+        g_currentMission.wailaHudMiniLeft = left
+        g_currentMission.wailaHudMiniRight = left + self.miniWidth
+        g_currentMission.wailaHudMiniBottom = panelBottom
+    end
+
+    drawFilledRect(left, panelBottom, self.miniWidth, self.miniHeight, 0, 0, 0, 0.65)
+
+    setTextAlignment(RenderText.ALIGN_LEFT)
+    local textLeft = left + 0.008
+
+    setTextColor(1, 1, 1, 1)
+    setTextBold(true)
+    renderText(textLeft, top - 0.017, self.miniTitleSize, "WAILA")
+    setTextBold(false)
+
+    setTextColor(0.65, 0.65, 0.65, 1)
+    renderText(textLeft, top - 0.029, self.miniKeybindSize, self:getActionKeyLabel("WAILA_TOGGLE_HUD", "[Shift+M]"))
+
+    -- Header divider, matching IW's panels - everything was crammed into
+    -- one ungapped block before, no visual separation between the header
+    -- (title/keybind) and the body content below it.
+    local headerHeight = 0.036
+    drawFilledRect(left, top - headerHeight, self.miniWidth, 0.001, 0, 0, 0, 0.7)
+    local bodyTop = top - headerHeight
+
+    -- Scan time is the point raycast's own cost (updatePointInspection,
+    -- which now always runs regardless of whether the full inspector is
+    -- toggled on) - the actual number to watch if wondering whether this
+    -- background scanning tanks performance, not overall FPS, which every
+    -- other mod and the base game itself also feed into.
+    if perf ~= nil then
+        setTextColor(0.55, 0.75, 0.55, 1)
+        renderText(
+            textLeft, bodyTop - 0.016, self.miniKeybindSize,
+            string.format("%.0ffps  %.2fms", perf.fps or 0, perf.scanMs or 0)
+        )
+    end
+
+    setTextColor(1, 1, 1, 1)
+    local summary = self:truncateToWidth(
+        self:getMiniSummary(inspection),
+        self.miniValueSize,
+        self.miniWidth - 0.016
+    )
+    renderText(textLeft, panelBottom + 0.014, self.miniValueSize, summary)
+
+    setTextAlignment(RenderText.ALIGN_LEFT)
+end
+
 function WailaHud:drawLines(lines)
-    local x = self.right - self.width + self.paddingX
+    -- Dock directly under our own mini panel, which is always drawn
+    -- first and is the real anchor for this whole row now - falls back
+    -- to the fixed top-right corner only if the mini panel somehow never
+    -- ran (shouldn't happen in practice, both are the same mod).
+    local boxLeft = self.right - self.width
+    local boxWidth = self.width
+    local top = self.top
+
+    if g_currentMission ~= nil and g_currentMission.wailaHudMiniBottom ~= nil then
+        boxLeft = g_currentMission.wailaHudMiniLeft
+        boxWidth = self.width
+        top = g_currentMission.wailaHudMiniBottom - WAILA_HUD_IW_GAP
+    end
+
+    local x = boxLeft + self.paddingX
     local panelHeight = #lines * self.lineHeight + self.paddingY * 2
-    local panelBottom = self.top - panelHeight + self.paddingY
+    local panelBottom = top - panelHeight + self.paddingY
 
     if drawFilledRect ~= nil then
         drawFilledRect(
-            self.right - self.width,
+            boxLeft,
             panelBottom,
-            self.width,
+            boxWidth,
             panelHeight,
-            0.02, 0.02, 0.02, 0.92
+            0, 0, 0, 0.65
         )
     end
 
@@ -51,7 +222,7 @@ function WailaHud:drawLines(lines)
 
     for index, entry in ipairs(lines) do
         setTextBold(entry.bold)
-        renderText(x, self.top - index * self.lineHeight, self.textSize, entry.text)
+        renderText(x, top - index * self.lineHeight, self.textSize, entry.text)
     end
 
     setTextBold(false)

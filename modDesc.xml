@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" standalone="no" ?>
 <modDesc descVersion="93">
-    <author>me</author>
+    <author>ubuntu811</author>
     <version>0.1.0.0</version>
     <title>
         <en>What Am I Looking At?</en>
@@ -27,9 +27,14 @@
     </extraSourceFiles>
 
     <actions>
-        <action name="WAILA_TOGGLE_HUD" axisType="HALF" category="ONFOOT"/>
-        <action name="WAILA_DUMP_TARGET" axisType="HALF" category="ONFOOT"/>
-        <action name="WAILA_DUMP_FOLIAGE_CATALOG" axisType="HALF" category="ONFOOT"/>
+        <!-- No category attribute: category="ONFOOT" made the engine
+             auto-deactivate these while in a vehicle, regardless of how
+             they were registered in Lua. We manage activation/visibility
+             ourselves via the global PlayerInputComponent hook, so these
+             should work identically on foot or in any vehicle. -->
+        <action name="WAILA_TOGGLE_HUD" axisType="HALF"/>
+        <action name="WAILA_DUMP_TARGET" axisType="HALF"/>
+        <action name="WAILA_DUMP_FOLIAGE_CATALOG" axisType="HALF"/>
     </actions>
 
     <inputBinding>
