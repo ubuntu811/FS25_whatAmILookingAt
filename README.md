@@ -28,7 +28,7 @@ HUD is toggled on - the full HUD slides open underneath it.
 - raycast target and node ID/name
 - terrain material, field state and ground type
 - foliage layers at the target
-- grouped terrain and foliage statistics for a 10×10 m area
+- grouped terrain and foliage statistics for a 5×5 m area
 - vehicle/placeable node object where available
 - tree/log/split-shape classification
 - rigid-body type, split state, volume, mass and sleeping state where exposed by the engine
