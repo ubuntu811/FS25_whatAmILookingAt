@@ -23,9 +23,23 @@ local function getObjectName(object)
     return object.configFileName or object.className
 end
 
+-- Was always calling object:getRootVehicle() first, which for an
+-- attached implement returns the *towing tractor* - the root of the
+-- whole combo chain in GIANTS' vehicle-train model, not the specific
+-- thing that was actually hit. Confirmed live: aiming straight at a
+-- seeder implement's own body still showed "Vehicle: Case IH Steiger 785
+-- Quadtrac" (the tractor), never the implement itself. If the hit object
+-- already IS a vehicle in its own right (the implement), that's what was
+-- physically hit and what inspection should report - getRootVehicle/
+-- rootVehicle are only a fallback for resolving a raw non-vehicle
+-- component up to *some* owning vehicle.
 local function getRootVehicle(object)
     if object == nil then
         return nil
+    end
+
+    if object.isVehicle or (Vehicle ~= nil and object.isa ~= nil and object:isa(Vehicle)) then
+        return object
     end
 
     if object.getRootVehicle ~= nil then
@@ -37,10 +51,6 @@ local function getRootVehicle(object)
 
     if object.rootVehicle ~= nil then
         return object.rootVehicle
-    end
-
-    if object.isVehicle or (Vehicle ~= nil and object.isa ~= nil and object:isa(Vehicle)) then
-        return object
     end
 
     return nil
@@ -160,6 +170,55 @@ function WailaVehicleInspector:inspect(hit, objectInspection)
     local wheels = vehicle.spec_wheels ~= nil and vehicle.spec_wheels.wheels or {}
     local attacherJoints = vehicle.spec_attacherJoints ~= nil and vehicle.spec_attacherJoints.attacherJoints or {}
 
+    -- turnedOn/lowered are only meaningful (not just a default false) when
+    -- the relevant spec is actually present - confirmed the hard way
+    -- tonight debugging a seeder that "wasn't turned on" per
+    -- getIsTurnedOn() despite having no engine to turn on at all, and
+    -- similarly for getIsLowered() on something with no lowering
+    -- mechanism. Reported as nil (not false) when the spec is missing,
+    -- so it's visually obvious in the HUD which case is which.
+    -- and/or can't be used here - a real false from getIsTurnedOn()/
+    -- getIsLowered() would get silently swallowed into nil by the
+    -- "x and y or z" pattern, exactly the distinction this exists to show.
+    local hasMotor = vehicle.spec_motorized ~= nil
+    local turnedOn = nil
+    if hasMotor and vehicle.getIsTurnedOn ~= nil then
+        turnedOn = WailaUtil.safeCall(nil, vehicle.getIsTurnedOn, vehicle)
+    end
+
+    local hasAttachable = vehicle.spec_attachable ~= nil
+    local lowered = nil
+    if hasAttachable and vehicle.getIsLowered ~= nil then
+        lowered = WailaUtil.safeCall(nil, vehicle.getIsLowered, vehicle)
+    end
+
+    local hasFoldable = vehicle.spec_foldable ~= nil
+    local unfolded = nil
+    if hasFoldable and vehicle.getIsUnfolded ~= nil then
+        unfolded = WailaUtil.safeCall(nil, vehicle.getIsUnfolded, vehicle)
+    end
+
+    local hasSowingMachine = vehicle.spec_sowingMachine ~= nil
+    -- The one field that actually correlated with real sowing activity,
+    -- confirmed via live dumps - turnedOn/lowered/unfolded above all
+    -- turned out uncorrelated with it. Read directly as a table field,
+    -- not a method - that's how it showed up in the dump. and/or would
+    -- swallow a real false into nil here too, same bug as before.
+    local isWorking = nil
+    if hasSowingMachine then
+        isWorking = vehicle.spec_sowingMachine.isWorking
+    end
+
+    local hasPushHandTool = vehicle.spec_pushHandTool ~= nil
+
+    local workAreaTypes = nil
+    if vehicle.spec_workArea ~= nil and vehicle.spec_workArea.workAreas ~= nil then
+        workAreaTypes = {}
+        for _, workArea in ipairs(vehicle.spec_workArea.workAreas) do
+            table.insert(workAreaTypes, tostring(workArea.type))
+        end
+    end
+
     return {
         hitNodeId = hitNodeId,
         hitNodeName = WailaUtil.safeGlobalCall("getName", nil, hitNodeId),
@@ -186,6 +245,17 @@ function WailaVehicleInspector:inspect(hit, objectInspection)
         attacherJointNodeId = attacherJointNodeId,
         attacherJointNodeName = attacherJointNodeName,
         attacherJointType = attacherJointType,
-        attacherJointTypeName = attacherJointTypeName
+        attacherJointTypeName = attacherJointTypeName,
+
+        hasMotor = hasMotor,
+        turnedOn = turnedOn,
+        hasAttachable = hasAttachable,
+        lowered = lowered,
+        hasFoldable = hasFoldable,
+        unfolded = unfolded,
+        hasSowingMachine = hasSowingMachine,
+        isWorking = isWorking,
+        hasPushHandTool = hasPushHandTool,
+        workAreaTypes = workAreaTypes
     }
 end

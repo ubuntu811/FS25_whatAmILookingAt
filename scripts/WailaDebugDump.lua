@@ -41,6 +41,44 @@ function WailaDebugDump.dump(inspection)
         for key, value in pairs(inspection.vehicle) do
             log("vehicle.%s = %s (%s)", tostring(key), tostring(value), type(value))
         end
+
+        -- Checking the tractor's engine turned out to be nearly useless
+        -- as an "is this seeder actually working" gate - the engine's on
+        -- the whole time you're driving, seeding or not. The real
+        -- per-implement activation state (referenced in real seeder XML
+        -- as <needsActivation>) should live on spec_sowingMachine itself,
+        -- not the generic vehicle-level getIsTurnedOn we already found
+        -- unreliable. Dumping its real top-level fields directly instead
+        -- of guessing another name blind.
+        local rawVehicle = inspection.vehicle.vehicle
+        if rawVehicle ~= nil and rawVehicle.spec_sowingMachine ~= nil then
+            log("-- spec_sowingMachine --")
+            dumpTable(rawVehicle.spec_sowingMachine, "spec_sowingMachine.", 1, {})
+        end
+
+        -- Aiming the crosshair precisely at a towed implement while
+        -- actually driving the tractor is fiddly - walk the driven
+        -- vehicle's own attachments instead, so one dump from the
+        -- driver's seat covers the seeder too, not just whatever's
+        -- directly under the crosshair (the tractor's own cab/hood in
+        -- practice). getAttachedImplements() is the real, well-established
+        -- GIANTS API for this - each entry has an .object field pointing
+        -- at the attached vehicle.
+        if rawVehicle ~= nil and rawVehicle.getAttachedImplements ~= nil then
+            local implements = WailaUtil.safeCall(nil, rawVehicle.getAttachedImplements, rawVehicle)
+            if implements ~= nil then
+                for i, entry in ipairs(implements) do
+                    local implementVehicle = entry.object
+                    if implementVehicle ~= nil then
+                        log("-- attached implement [%d]: configFileName=%s --", i, tostring(implementVehicle.configFileName))
+                        log("implement[%d].spec_sowingMachine present = %s", i, tostring(implementVehicle.spec_sowingMachine ~= nil))
+                        if implementVehicle.spec_sowingMachine ~= nil then
+                            dumpTable(implementVehicle.spec_sowingMachine, string.format("implement[%d].spec_sowingMachine.", i), 1, {})
+                        end
+                    end
+                end
+            end
+        end
     end
 
     if inspection.terrain ~= nil then

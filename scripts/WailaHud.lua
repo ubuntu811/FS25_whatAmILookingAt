@@ -296,6 +296,33 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         else
             self:addLine(lines, string.format("Attacher joints: %d", vehicle.attacherJointCount or 0))
         end
+
+        -- "-" means the spec itself isn't present (e.g. no engine to turn
+        -- on, no lowering mechanism at all) - distinct from a real
+        -- false/no, which WailaUtil.bool also renders but means something
+        -- different. Added specifically to stop guessing what
+        -- getIsTurnedOn()/getIsLowered() actually report on a given
+        -- vehicle instead of round-tripping through a live test each time.
+        self:addLine(lines, string.format("Motorized: %s  turnedOn=%s   Attachable: %s  lowered=%s",
+            WailaUtil.bool(vehicle.hasMotor), WailaUtil.bool(vehicle.turnedOn),
+            WailaUtil.bool(vehicle.hasAttachable), WailaUtil.bool(vehicle.lowered)))
+
+        self:addLine(lines, string.format("Foldable: %s  unfolded=%s",
+            WailaUtil.bool(vehicle.hasFoldable), WailaUtil.bool(vehicle.unfolded)))
+
+        if vehicle.hasSowingMachine then
+            -- isWorking is the one field that actually correlated with
+            -- real sowing activity across everything else tried tonight -
+            -- on the HUD live now instead of needing a Shift+J dump to
+            -- the log every time.
+            self:addLine(lines, string.format("SowingMachine: yes  isWorking=%s  workAreaTypes=%s",
+                WailaUtil.bool(vehicle.isWorking),
+                vehicle.workAreaTypes ~= nil and table.concat(vehicle.workAreaTypes, ",") or "-"))
+        end
+
+        if vehicle.hasPushHandTool then
+            self:addLine(lines, "PushHandTool: yes")
+        end
     end
 
     if object ~= nil and object.isSplitShape then
