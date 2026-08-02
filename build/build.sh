@@ -26,6 +26,9 @@ mkdir -p $BUILD_DIR
 echo "=== sanity check lua scripts ==="
 find . -name '*.lua' -print0 | xargs -0 -n1 luac5.1 -p
 
+echo "=== sanity check xml files ==="
+find . -name '*.xml' -print0 | xargs -0 -n1 python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])'
+
 echo "--> Copying production files to staging area..."
 # Copy the core runtime logic and metadata
 for i in icon.dds scripts/ l10n/ modDesc.xml; do 

@@ -183,7 +183,12 @@ function WailaHud:drawMini(inspection, perf)
         self.miniValueSize,
         self.miniWidth - 0.016
     )
-    renderText(textLeft, panelBottom + 0.014, self.miniValueSize, summary)
+    -- panelBottom + 0.018, not + 0.014 - matches ImmersiveWeathering's
+    -- drawHudPanel content row (its swatch+value text sits at
+    -- swatchBottom + 0.004 = panelBottom + 0.018) exactly, so this summary
+    -- line and IW's Texture/Chance/Samples/Run Now/Weather Target content
+    -- all land on the same Y instead of a few pixels off from each other.
+    renderText(textLeft, panelBottom + 0.018, self.miniValueSize, summary)
 
     setTextAlignment(RenderText.ALIGN_LEFT)
 end
@@ -250,7 +255,12 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     local foliagePoint = inspection.foliagePoint or {}
 
     if targetKind == "terrain" and #foliagePoint > 0 then
-        targetKind = string.format("foliage (%s)", foliagePoint[1].name)
+        -- .density (the growth-state/level number) was already sitting
+        -- right there on the same table the "Foliage here:" line below
+        -- already uses it from - this line just never read it, showing
+        -- "decoFoliage" with no level while the summary below correctly
+        -- shows "decoFoliage L9" for the exact same point.
+        targetKind = string.format("foliage (%s(%s)[%s])", foliagePoint[1].name, tostring(foliagePoint[1].density), foliagePoint[1].kind or "unknown")
     end
 
     self:addLine(lines, string.format("Target: %s", targetKind), true)
@@ -339,7 +349,7 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         local foliagePoint = inspection.foliagePoint or {}
         local names = {}
         for _, entry in ipairs(foliagePoint) do
-            table.insert(names, string.format("%s(%s)", entry.name, tostring(entry.density)))
+            table.insert(names, string.format("%s(%s)[%s]", entry.name, tostring(entry.density), entry.kind or "unknown"))
         end
         self:addLine(lines, "Foliage here: " .. (#names > 0 and table.concat(names, ", ") or "<empty>"))
 

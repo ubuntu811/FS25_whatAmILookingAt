@@ -244,6 +244,43 @@ function WailaFoliageInspector:listFoliageSystemFields()
     return fields
 end
 
+-- kind = "deco"/"paintable"/"unknown" per layerName, built from
+-- foliageSystem.decoFoliages/.paintableFoliages. Cached once per session -
+-- these lists don't change after map load. NOTE: confirmed NOT the full
+-- writable/readable vocabulary (see docs/engine-api/FoliageDensityMap.md) -
+-- anything only reachable via a map.xml <mapping> alias (not this map's own
+-- I3D-declared FoliageType name) will show up here as "unknown" even though
+-- it's genuinely one or the other. Honest gap, not a bug.
+function WailaFoliageInspector:getKindByLayerName()
+    if self.kindByLayerName ~= nil then
+        return self.kindByLayerName
+    end
+
+    local foliageSystem = g_currentMission ~= nil and g_currentMission.foliageSystem or nil
+    local kindByLayerName = {}
+
+    if foliageSystem ~= nil then
+        for _, foliage in ipairs(foliageSystem.decoFoliages or {}) do
+            if foliage.layerName ~= nil then
+                kindByLayerName[foliage.layerName] = "deco"
+            end
+        end
+        for _, foliage in ipairs(foliageSystem.paintableFoliages or {}) do
+            if foliage.layerName ~= nil then
+                -- A layer can be BOTH deco and paintable (this map declares
+                -- decoFoliage/decoBush/forestBush/forestGrass under both
+                -- blocks) - "paintable" wins the tag since it's the more
+                -- specific claim (this layer is also editor/tool-paintable).
+                kindByLayerName[foliage.layerName] = "paintable"
+            end
+        end
+    end
+
+    self.kindByLayerName = kindByLayerName
+
+    return kindByLayerName
+end
+
 -- ------------------------------------------------------------
 -- Public: what's under the crosshair right now
 -- ------------------------------------------------------------
@@ -256,13 +293,14 @@ function WailaFoliageInspector:inspectPoint(x, z)
 
     self:resolveFoliagePlaneIds(data)
 
+    local kindByLayerName = self:getKindByLayerName()
     local hits = {}
 
     for _, layerData in ipairs(data.multilayers) do
         local name, value = decodeFoliageAt(layerData, x, z)
 
         if name ~= nil then
-            table.insert(hits, {name = name, density = value})
+            table.insert(hits, {name = name, density = value, kind = kindByLayerName[name] or "unknown"})
         end
     end
 
@@ -286,22 +324,7 @@ function WailaFoliageInspector:listAvailableFoliage()
 
     self:resolveFoliagePlaneIds(data)
 
-    local foliageSystem = g_currentMission ~= nil and g_currentMission.foliageSystem or nil
-    local kindByLayerName = {}
-
-    if foliageSystem ~= nil then
-        for _, foliage in ipairs(foliageSystem.decoFoliages or {}) do
-            if foliage.layerName ~= nil then
-                kindByLayerName[foliage.layerName] = "deco"
-            end
-        end
-        for _, foliage in ipairs(foliageSystem.paintableFoliages or {}) do
-            if foliage.layerName ~= nil then
-                kindByLayerName[foliage.layerName] = "paintable"
-            end
-        end
-    end
-
+    local kindByLayerName = self:getKindByLayerName()
     local layers = {}
 
     for layerIndex, layerData in ipairs(data.multilayers) do

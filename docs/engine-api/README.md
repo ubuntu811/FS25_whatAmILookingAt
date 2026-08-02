@@ -13,6 +13,14 @@ real C++ source. Confirmed gaps: `TerrainDeformation`, `getTerrainNumOfLayers`,
 callable natives that don't appear in it at all. Entries that ARE present are
 often a single line with no behavior notes, no gotchas, no worked example.
 
+Both files ship as plain, unpacked XML with the game install (not inside the
+`.pak` archives) - find them once and keep the paths handy:
+
+```
+<Steam install>/shared/xml/schema/*.xsd          # e.g. mission00.xsd = real map.xml structure
+<Steam install>/sdk/debugger/scriptBinding.xml   # every Lua-callable engine function
+```
+
 Nothing here comes from decompiled C++ or official docs. It's reconstructed by
 either:
 
@@ -30,7 +38,7 @@ a guarantee - the real test is calling it and checking the result.
 
 - [CollisionFlag.md](CollisionFlag.md) - raycast filter bitmask
 - [TerrainAttributes.md](TerrainAttributes.md) - reading ground material at a point
-- [FoliageDensityMap.md](FoliageDensityMap.md) - deco vegetation (grass/bush/etc)
+- [FoliageDensityMap.md](FoliageDensityMap.md) - deco vegetation (grass/bush/etc), plus [check_foliage_sync.py](check_foliage_sync.py) to catch map.xml/I3D mismatches automatically
 - [FSDensityMapUtil.md](FSDensityMapUtil.md) - clear/sow/field-check helpers
 - [TerrainDeformation.md](TerrainDeformation.md) - terrain shape + ground texture paint
 - [TreePlantManager.md](TreePlantManager.md) - tree placement
