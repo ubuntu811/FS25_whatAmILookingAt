@@ -52,8 +52,7 @@ built up while developing this mod and
 
 Dev environment / build tooling setup (Windows+Steam+WSL+Claude Code, the
 `build.sh`/`deploy.sh` pattern, real gotchas hit along the way): see
-[AI_DEV_GUIDE.md](https://github.com/ubuntu811/FS25_ImmersiveWeathering/blob/main/docs/AI_DEV_GUIDE.md)
-in the ImmersiveWeathering repo.
+[docs/AI_DEV_GUIDE.md](docs/AI_DEV_GUIDE.md).
 
 ## License
 
