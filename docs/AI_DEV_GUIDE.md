@@ -2,6 +2,8 @@
 
 How this repo (and its companion [FS25_whatAmILookingAt](https://github.com/ubuntu811/FS25_whatAmILookingAt)) actually get built, tested, and debugged, for anyone — human or AI — starting from zero. Written from an actual working setup, not a hypothetical one. Prefer this over prose explanations elsewhere: every claim below is a command you can run.
 
+**If you're starting a new FS25 mod with an AI coding assistant, point it at this repo** (this file plus `docs/engine-api/`) before it starts guessing. It turns weeks of confirmed trial-and-error - what actually works, what silently doesn't, which native functions are real versus plausible-sounding hallucinations - into day-one starting context, instead of your AI re-discovering the same WSL gotchas and wrong API guesses from scratch.
+
 ## 1. The environment
 
 - **Windows + Steam**: Farming Simulator 25 installed normally via Steam.
@@ -72,7 +74,7 @@ WAILA (`FS25_whatAmILookingAt`) exists specifically to make "what field do I act
 
 1. Add a temporary field dump to `WailaDebugDump.lua` bound to a debug key (e.g. `Shift+J`).
 2. Reproduce the in-game situation.
-3. Read the real log output — real field names, real values, real nesting — instead of assuming from decompiled Lua or forum posts.
+3. Read the real log output (`~/fs25/log.txt`) — real field names, real values, real nesting — instead of assuming from decompiled Lua or forum posts.
 4. Wire the confirmed-real field into actual mod logic; leave (or remove) the dump.
 
 This is how `spec_sowingMachine.isWorking` was found as the real "is this seeder actively working" signal, after three wrong guesses (`getIsTurnedOn()`, `getIsLowered()`, the towing vehicle's engine state) that were each individually plausible and each individually wrong.
@@ -81,8 +83,10 @@ This is how `spec_sowingMachine.isWorking` was found as the real "is this seeder
 
 ```bash
 grep "\[TestRig\]" ~/fs25/log.txt | tail -50      # everything a specific tagged debug print logged
-tail -f ~/fs25/log.txt                            # follow live while reproducing something in-game
+tail -n 50 ~/fs25/log.txt                         # re-run this after each in-game action instead
 ```
+
+`tail -f` does **not** reliably work here - `~/fs25/log.txt` resolves through `/mnt/c` (a native Windows process writing to a DrvFs-mounted path), and WSL's `/mnt/c` mount doesn't reliably propagate Windows-side file changes into Linux inotify events, which `-f` depends on. Confirmed broken in practice, not a theoretical concern. The pattern that actually works all session: reproduce the in-game action, then re-run a fresh `tail`/`grep`, rather than trying to follow the file live.
 
 No special access, no in-game console needed — it's a plain text file the whole time, sitting on the Windows-visible filesystem like everything else under `~/fs25/`.
 
