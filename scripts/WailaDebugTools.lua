@@ -308,3 +308,39 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
         log("[TestRig] CONCRETEINDUSTRIAL layer not found, skipping border")
     end
 end
+
+local function dumpTable(value, prefix, depth, seen)
+    if type(value) ~= "table" or depth <= 0 or seen[value] then
+        return
+    end
+
+    seen[value] = true
+
+    for key, nested in pairs(value) do
+        log("%s%s = %s (%s)", prefix, tostring(key), tostring(nested), type(nested))
+
+        if type(nested) == "table" then
+            dumpTable(nested, prefix .. "  ", depth - 1, seen)
+        end
+    end
+end
+
+-- Investigation - no confirmed "is it raining" read anywhere: no Weather/
+-- Rain/Environment category in scriptBinding.xml, no weather check
+-- anywhere in TerraFarm's real source (searched, not just assumed
+-- absent), dataS/scripts isn't browsable as loose files to check base
+-- game Lua directly. map.xml does declare <environment filename=
+-- "maps/config/environment.xml"/>, so g_currentMission.environment
+-- almost certainly exists at runtime - dumping its real fields directly
+-- (same pattern that found foliageSystem.decoFoliages) instead of
+-- guessing native function names.
+function WailaDebugTools:dumpEnvironment()
+    if g_currentMission.environment == nil then
+        log("[Environment] g_currentMission.environment is nil")
+        return
+    end
+
+    log("[Environment] --- g_currentMission.environment fields (depth 2) ---")
+    dumpTable(g_currentMission.environment, "environment.", 2, {})
+    log("[Environment] --- end ---")
+end

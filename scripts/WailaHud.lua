@@ -237,6 +237,23 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     local lines = {}
     self:addLine(lines, "WHAT AM I LOOKING AT?", true)
 
+    -- Global state, not tied to whatever's under the crosshair - the base
+    -- game's own weather icon (top-right, next to the date) already tells
+    -- you at a glance whether it's raining; the actual point of exposing
+    -- this here is the raw fields underneath that icon, which nothing else
+    -- shows numerically. See docs/engine-api/Weather.md - isRaining is a
+    -- derived three-part formula, not something the engine hands you
+    -- directly, so it's worth showing the inputs, not just the verdict.
+    if inspection ~= nil and inspection.weather ~= nil then
+        local weather = inspection.weather
+        self:addLine(lines, "WEATHER", true)
+        self:addLine(lines, string.format(
+            "rainScale=%.2f  timeSinceLastRain=%.1fs  temp=%.1f\194\176C",
+            weather.rainScale, weather.timeSinceLastRain, weather.temperature
+        ))
+        self:addLine(lines, string.format("isRaining=%s (rainScale>0.1 and timeSinceLastRain<30 and temp>0)", WailaUtil.bool(weather.isRaining)))
+    end
+
     if inspection == nil or inspection.hit == nil then
         self:addLine(lines, "No target")
         self:drawLines(lines)

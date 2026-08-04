@@ -146,6 +146,10 @@ function FS25WhatAmILookingAt:onDumpGroundDensityProbe()
     self.debugTools:dumpGroundDensityProbe(self.current.hit.x, self.current.hit.y, self.current.hit.z)
 end
 
+function FS25WhatAmILookingAt:onDumpEnvironment()
+    self.debugTools:dumpEnvironment()
+end
+
 -- Same OptionDialog pattern as IW's own debug menu (ImmersiveWeathering:
 -- showDebugMenu) - a real base-game GUI class (dataS/gui/dialogs/, same
 -- family as YesNoDialog/TextInputDialog), not a dependency between the
@@ -162,6 +166,7 @@ function FS25WhatAmILookingAt:showDebugMenu()
         { "Paint layer test row", self.onPlaceTerrainLayerTestRow },
         { "Dump density probe", self.onDumpDensityProbe },
         { "Dump ground layer dataPlane probe", self.onDumpGroundDensityProbe },
+        { "Dump environment/weather state", self.onDumpEnvironment },
     }
 
     local options = {}
@@ -247,15 +252,47 @@ function FS25WhatAmILookingAt:update(dt)
     end
 end
 
+-- Confirmed real via base game source (dataS/scripts/vehicles/
+-- specializations/Washable.lua), not scriptBinding.xml - see
+-- docs/engine-api/Weather.md. isRaining is the base game's own three-part
+-- formula, not a simple flag - copying just rainScale > 0.1 alone would
+-- also count fresh snow as rain.
+function FS25WhatAmILookingAt:readWeather()
+    if g_currentMission == nil or g_currentMission.environment == nil or g_currentMission.environment.weather == nil then
+        return nil
+    end
+
+    local weather = g_currentMission.environment.weather
+    local ok, rainScale, timeSinceLastRain, temperature = pcall(function()
+        return weather:getRainFallScale(), weather:getTimeSinceLastRain(), weather:getCurrentTemperature()
+    end)
+
+    if not ok then
+        return nil
+    end
+
+    return {
+        rainScale = rainScale,
+        timeSinceLastRain = timeSinceLastRain,
+        temperature = temperature,
+        isRaining = rainScale > 0.1 and timeSinceLastRain < 30 and temperature > 0,
+    }
+end
+
 function FS25WhatAmILookingAt:updatePointInspection()
+    -- Read unconditionally, before the no-hit early return below - weather
+    -- is global state, not tied to whether the crosshair is over terrain.
+    local weather = self:readWeather()
+
     local hit = self.raycaster:castFromCamera()
     if hit == nil then
-        self.current = {hit = nil}
+        self.current = {hit = nil, weather = weather}
         return
     end
 
     self.current = self.current or {}
     self.current.hit = hit
+    self.current.weather = weather
     self.current.object = self.objectInspector:inspect(hit)
     self.current.vehicle = self.vehicleInspector:inspect(hit, self.current.object)
 
