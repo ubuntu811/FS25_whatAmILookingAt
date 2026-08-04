@@ -9,7 +9,7 @@ How this repo (and its companion [FS25_whatAmILookingAt](https://github.com/ubun
 - **Two different folders, do not confuse them**:
   - Game **install** (read-only reference material): `/mnt/c/Program Files (x86)/Steam/steamapps/common/Farming Simulator 25/`
   - Game **user data** (mods, saves, logs, settings): `/mnt/c/Users/<you>/Documents/My Games/FarmingSimulator2025/` — usually symlinked to something like `~/fs25/` inside WSL for convenience.
-- **Claude Code** runs inside WSL, editing files under `~/my_mods/<ModName>/` (a git repo per mod), building, and deploying straight into `~/fs25/mods/<ModName>/` as a loose unzipped folder for FS25's hot-reload.
+- **Claude Code** is installed on Windows, not inside WSL - there's no `apt install claude-code`. It gets WSL filesystem/shell access through Claude Code's own WSL integration setting (an explicit opt-in, not automatic). With that enabled, it edits files under `~/my_mods/<ModName>/` (a git repo per mod), building, and deploying straight into `~/fs25/mods/<ModName>/` as a loose unzipped folder for FS25's hot-reload.
 
 Finding the install path the first time: don't blind-`find` all of `/mnt/c` (WSL↔Windows crossing is slow, real timeouts happen). Target a known filename instead:
 
