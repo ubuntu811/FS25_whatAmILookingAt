@@ -70,6 +70,9 @@ function WailaObjectInspector:inspect(hit)
     local rigidBodyType = WailaUtil.safeGlobalCall("getRigidBodyType", nil, nodeId)
     local nodeName = WailaUtil.safeGlobalCall("getName", nil, nodeId)
     local parent = WailaUtil.safeGlobalCall("getParent", nil, nodeId)
+    local parentNodeName = parent ~= nil and WailaUtil.safeGlobalCall("getName", nil, parent) or nil
+    local parentIsTerrainRootNode = parent ~= nil and parent == g_currentMission.terrainRootNode
+    local parentIsTerrainNode = parent ~= nil and parent == g_terrainNode
     local isSplitShape = false
 
     if getHasClassId ~= nil and ClassIds ~= nil and ClassIds.MESH_SPLIT_SHAPE ~= nil then
@@ -115,6 +118,9 @@ function WailaObjectInspector:inspect(hit)
         nodeName = nodeName,
         nodePosition = getWorldPosition(nodeId),
         parentNodeId = parent,
+        parentNodeName = parentNodeName,
+        parentIsTerrainRootNode = parentIsTerrainRootNode,
+        parentIsTerrainNode = parentIsTerrainNode,
         object = object,
         objectClass = WailaUtil.className(object),
         objectName = getObjectName(object),

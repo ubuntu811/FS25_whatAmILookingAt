@@ -83,7 +83,29 @@ function WailaDebugDump.dump(inspection)
 
     if inspection.terrain ~= nil then
         for key, value in pairs(inspection.terrain) do
-            log("terrain.%s = %s", tostring(key), tostring(value))
+            log("terrain.%s = %s (%s)", tostring(key), tostring(value), type(value))
+            if type(value) == "table" then
+                dumpTable(value, "terrain." .. tostring(key) .. ".", 2, {})
+            end
+        end
+
+        -- Just curious, not backed by any real theory - dataPlaneId is an
+        -- "entityId" (an integer), and this map has 62 real terrain
+        -- layers, so: what if a handful of low integers happen to be
+        -- valid dataPlaneIds for SOMETHING, named or not? Every call
+        -- pcall'd - a wrong ID here is expected far more often than a
+        -- right one, this must never be able to error out of the dump.
+        if inspection.terrain.x ~= nil then
+            log("-- brute-force dataPlaneId scan (1-70), pcall'd -- ")
+            for i = 1, 70 do
+                local okType, typeIndex = pcall(
+                    getDensityTypeIndexAtWorldPos, i, inspection.terrain.x, inspection.terrain.y, inspection.terrain.z
+                )
+                if okType and typeIndex ~= nil then
+                    log("  id=%d -> typeIndex=%s", i, tostring(typeIndex))
+                end
+            end
+            log("-- brute-force scan done --")
         end
     end
 

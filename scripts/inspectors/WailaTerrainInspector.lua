@@ -17,11 +17,64 @@ function WailaTerrainInspector:getMaterialName(materialId)
     return MATERIAL_NAMES[materialId] or string.format("material-%s", tostring(materialId))
 end
 
+-- Investigation, not confirmed useful yet - getTerrainAttributesAtWorldPos
+-- (above) is confirmed as the only real per-position ground-type read, a
+-- coarse materialId bucket (DIRT/GRASS/etc, ~7 values). These candidate
+-- names are guesses at whether some OTHER named "terrain detail" density
+-- system exists that's more granular than that bucket - none of them are
+-- confirmed to resolve to anything. Real, confirmed: getTerrainDetailByName
+-- resolving a name to a dataPlaneId, and getDensityTypeIndexAtWorldPos/
+-- getDensityStatesAtWorldPos reading that dataPlaneId at a position - just
+-- not confirmed whether any of THESE SPECIFIC names are the right ones.
+-- This does NOT reveal which of the map's 62 individual paint layers
+-- (dirt01/grass01/gravel01/etc) is under a point, even in the best case -
+-- that's a different subsystem (TerrainDeformation paint layers) with no
+-- per-position read at all, confirmed separately. At most this could
+-- surface a ground classification more granular than the coarse bucket
+-- but coarser than the 62 layers.
+local DENSITY_PROBE_CANDIDATE_NAMES = {
+    "groundType", "GROUND_TYPE", "material", "terrainType", "ground",
+}
+
+function WailaTerrainInspector:resolveDensityProbeIds()
+    if self.densityProbeIdsResolved then
+        return
+    end
+
+    self.densityProbeIdsResolved = true
+    self.densityProbeIds = {}
+
+    if g_currentMission.terrainDetailId ~= nil then
+        self.densityProbeIds["terrainDetailId"] = g_currentMission.terrainDetailId
+    end
+
+    for _, name in ipairs(DENSITY_PROBE_CANDIDATE_NAMES) do
+        local okId, detailId = pcall(getTerrainDetailByName, g_terrainNode, name)
+
+        if okId and detailId ~= nil then
+            self.densityProbeIds[name] = detailId
+        end
+    end
+end
+
 function WailaTerrainInspector:inspectPoint(x, y, z)
     local isOnField, densityBits, groundType = FSDensityMapUtil.getFieldDataAtWorldPosition(x, y, z)
     local r, g, b, depth, materialId = getTerrainAttributesAtWorldPos(
         g_terrainNode, x, y, z, true, true, true, true, false
     )
+
+    self:resolveDensityProbeIds()
+
+    local densityProbe = {}
+    for label, dataPlaneId in pairs(self.densityProbeIds) do
+        local okType, typeIndex = pcall(getDensityTypeIndexAtWorldPos, dataPlaneId, x, y, z)
+        local okStates, states = pcall(getDensityStatesAtWorldPos, dataPlaneId, x, y, z)
+
+        densityProbe[label] = {
+            typeIndex = okType and typeIndex or nil,
+            states = okStates and states or nil,
+        }
+    end
 
     return {
         x = x,
@@ -35,7 +88,8 @@ function WailaTerrainInspector:inspectPoint(x, y, z)
         b = b,
         depth = depth,
         materialId = materialId,
-        materialName = self:getMaterialName(materialId)
+        materialName = self:getMaterialName(materialId),
+        densityProbe = densityProbe
     }
 end
 
