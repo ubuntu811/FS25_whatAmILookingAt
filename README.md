@@ -55,6 +55,24 @@ Dev environment / build tooling setup (Windows+Steam+WSL+Claude Code, the
 `build.sh`/`deploy.sh` pattern, real gotchas hit along the way): see
 [docs/AI_DEV_GUIDE.md](docs/AI_DEV_GUIDE.md).
 
+## Credits
+
+`docs/engine-api/` exists because these mods' authors published real,
+working source that answered questions `scriptBinding.xml` alone
+couldn't - specific real usage, not just general inspiration:
+
+- **TerraFarm** - the terrain paint/deformation API (`TerrainDeformation.md`),
+  the vehicle action-event registration pattern (`VehicleActionEvents.md`),
+  and the map-directory resolution pattern (`baseDirectory` +
+  `Utils.getDirectory`) both mods' `iw.xml`/config loaders use.
+- **FS25_LumberJack** - confirmed `DensityMapModifier` construction/usage
+  (`DensityMapModifier.md`).
+- **FS25_PowerTools** - the `OptionDialog`-based debug menu pattern both
+  mods' `Shift+L`/`Shift+Ctrl+M` debug tools menus are built on.
+- **FS25_allTheFoliage** - map-directory resolution (alongside TerraFarm),
+  and a real-world example pointing at `addFoliageTypeFromXML` as the
+  likely primitive behind runtime foliage-type registration.
+
 ## License
 
 GPLv3 - see [LICENSE](LICENSE).
