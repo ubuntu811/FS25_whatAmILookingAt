@@ -12,6 +12,7 @@ function FS25WhatAmILookingAt:loadMap()
     self.objectInspector = WailaObjectInspector.new()
     self.vehicleInspector = WailaVehicleInspector.new()
     self.hud = WailaHud.new()
+    self.debugTools = WailaDebugTools.new()
 
     self.areaSize = 5
     self.areaStep = 0.5
@@ -63,6 +64,17 @@ function FS25WhatAmILookingAt:registerActionEvents()
         g_inputBinding:setActionEventTextPriority(catalogId, GS_PRIO_LOW)
         g_inputBinding:setActionEventTextVisibility(catalogId, false)
     end
+
+    local _, debugMenuId = g_inputBinding:registerActionEvent(
+        InputAction.WAILA_DEBUG_MENU,
+        self,
+        self.onDebugMenu,
+        false, true, false, true, nil, true
+    )
+    if debugMenuId ~= nil then
+        g_inputBinding:setActionEventTextPriority(debugMenuId, GS_PRIO_LOW)
+        g_inputBinding:setActionEventTextVisibility(debugMenuId, false)
+    end
 end
 
 function FS25WhatAmILookingAt:onToggleHud()
@@ -85,6 +97,104 @@ function FS25WhatAmILookingAt:onDumpFoliageCatalog()
         self.foliageInspector:listWritableDecoLayers(),
         self.foliageInspector:listFoliageSystemFields()
     )
+end
+
+function FS25WhatAmILookingAt:onDebugMenu()
+    self:showDebugMenu()
+end
+
+-- These four all act at the current crosshair target (self.current.hit,
+-- already continuously maintained by the point raycast every frame) -
+-- unlike their original IW versions, no fresh raycast needed here.
+function FS25WhatAmILookingAt:onPlaceFoliageTestRig()
+    if self.current == nil or self.current.hit == nil then
+        log("[TestRig] No current terrain target")
+        return
+    end
+
+    self.debugTools:placeFoliageTestRig(self.current.hit.x, self.current.hit.z)
+end
+
+function FS25WhatAmILookingAt:onDumpTerrainLayers()
+    self.debugTools:dumpTerrainLayers()
+end
+
+function FS25WhatAmILookingAt:onPlaceTerrainLayerTestRow()
+    if self.current == nil or self.current.hit == nil then
+        log("[LayerTest] No current terrain target")
+        return
+    end
+
+    self.debugTools:placeTerrainLayerTestRow(self.current.hit.x, self.current.hit.z)
+end
+
+function FS25WhatAmILookingAt:onDumpDensityProbe()
+    if self.current == nil or self.current.hit == nil then
+        log("[DensityProbe] No current terrain target")
+        return
+    end
+
+    self.debugTools:dumpDensityProbe(self.current.hit.x, self.current.hit.y, self.current.hit.z)
+end
+
+function FS25WhatAmILookingAt:onDumpGroundDensityProbe()
+    if self.current == nil or self.current.hit == nil then
+        log("[GroundProbe] No current terrain target")
+        return
+    end
+
+    self.debugTools:dumpGroundDensityProbe(self.current.hit.x, self.current.hit.y, self.current.hit.z)
+end
+
+-- Same OptionDialog pattern as IW's own debug menu (ImmersiveWeathering:
+-- showDebugMenu) - a real base-game GUI class (dataS/gui/dialogs/, same
+-- family as YesNoDialog/TextInputDialog), not a dependency between the
+-- two mods, just a shared pattern. This is meant to be the landing spot
+-- for world-inspection debug tools currently living in IW (terrain layer
+-- dump, paint layer test row, density probe) that architecturally belong
+-- here instead - not moved yet, this is the menu they'll move into.
+function FS25WhatAmILookingAt:showDebugMenu()
+    local actions = {
+        { "Dump inspected target", self.onDumpTarget },
+        { "Dump foliage catalog for this map", self.onDumpFoliageCatalog },
+        { "Place foliage test rig", self.onPlaceFoliageTestRig },
+        { "Dump terrain layers", self.onDumpTerrainLayers },
+        { "Paint layer test row", self.onPlaceTerrainLayerTestRow },
+        { "Dump density probe", self.onDumpDensityProbe },
+        { "Dump ground layer dataPlane probe", self.onDumpGroundDensityProbe },
+    }
+
+    local options = {}
+    for index, action in ipairs(actions) do
+        options[#options + 1] = index .. ") " .. action[1]
+    end
+
+    local target = self
+    local function onDebugMenuSelected(callbackTarget, selectedOption, args)
+        log("[DebugMenu] callback fired, selectedOption=%s", tostring(selectedOption))
+
+        if type(selectedOption) ~= "number" or selectedOption == 0 then
+            return
+        end
+
+        local action = actions[selectedOption]
+
+        if action ~= nil and action[2] ~= nil then
+            log("[DebugMenu] running action %d: %s", selectedOption, action[1])
+            action[2](target)
+        end
+    end
+
+    OptionDialog.createFromExistingGui({
+        options = options,
+        optionText = "Choose a debug action",
+        optionTitle = "WAILA Debug Tools",
+        callbackFunc = onDebugMenuSelected,
+    }, "WailaDebugMenuOptionDialog")
+
+    local optionDialog = OptionDialog.INSTANCE
+    optionDialog.optionElement:setState(1)
+    optionDialog:setCallback(onDebugMenuSelected, target, {})
 end
 
 function FS25WhatAmILookingAt:update(dt)

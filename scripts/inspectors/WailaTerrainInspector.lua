@@ -44,14 +44,20 @@ function WailaTerrainInspector:resolveDensityProbeIds()
     self.densityProbeIdsResolved = true
     self.densityProbeIds = {}
 
-    if g_currentMission.terrainDetailId ~= nil then
+    -- 0 is this engine's "not found" sentinel for getTerrainDetailByName
+    -- (confirmed live: a candidate name resolved to 0, then
+    -- getDensityTypeIndexAtWorldPos(0, ...) errored every frame with
+    -- "Unknown entity id 0" since this runs continuously via the always-on
+    -- point raycast, not just while the full HUD is open) - nil alone
+    -- wasn't a strict enough guard.
+    if g_currentMission.terrainDetailId ~= nil and g_currentMission.terrainDetailId ~= 0 then
         self.densityProbeIds["terrainDetailId"] = g_currentMission.terrainDetailId
     end
 
     for _, name in ipairs(DENSITY_PROBE_CANDIDATE_NAMES) do
         local okId, detailId = pcall(getTerrainDetailByName, g_terrainNode, name)
 
-        if okId and detailId ~= nil then
+        if okId and detailId ~= nil and detailId ~= 0 then
             self.densityProbeIds[name] = detailId
         end
     end

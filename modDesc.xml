@@ -22,6 +22,7 @@
         <sourceFile filename="scripts/inspectors/WailaObjectInspector.lua" />
         <sourceFile filename="scripts/inspectors/WailaVehicleInspector.lua" />
         <sourceFile filename="scripts/WailaDebugDump.lua" />
+        <sourceFile filename="scripts/WailaDebugTools.lua" />
         <sourceFile filename="scripts/WailaHud.lua" />
         <sourceFile filename="scripts/FS25WhatAmILookingAt.lua" />
     </extraSourceFiles>
@@ -35,6 +36,10 @@
         <action name="WAILA_TOGGLE_HUD" axisType="HALF"/>
         <action name="WAILA_DUMP_TARGET" axisType="HALF"/>
         <action name="WAILA_DUMP_FOLIAGE_CATALOG" axisType="HALF"/>
+        <!-- Menu for throwaway/investigation debug tools, same pattern as
+             IW's own IW_DEBUG_MENU - keeps future one-off world-inspection
+             probes from needing their own keybind each time. -->
+        <action name="WAILA_DEBUG_MENU" axisType="HALF"/>
     </actions>
 
     <inputBinding>
@@ -46,6 +51,9 @@
         </actionBinding>
         <actionBinding action="WAILA_DUMP_FOLIAGE_CATALOG">
             <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_k" index="1" />
+        </actionBinding>
+        <actionBinding action="WAILA_DEBUG_MENU">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_l" index="1" />
         </actionBinding>
     </inputBinding>
 
@@ -61,6 +69,10 @@
         <text name="input_WAILA_DUMP_FOLIAGE_CATALOG">
             <en>Dump foliage catalog for this map</en>
             <de>Bewuchskatalog dieser Karte ausgeben</de>
+        </text>
+        <text name="input_WAILA_DEBUG_MENU">
+            <en>Debug tools menu</en>
+            <de>Debug-Werkzeuge Menü</de>
         </text>
     </l10n>
 </modDesc>

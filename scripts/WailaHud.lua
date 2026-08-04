@@ -371,6 +371,7 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         end
     end
 
-    self:addLine(lines, "Shift+J: dump current target")
+    self:addLine(lines, self:getActionKeyLabel("WAILA_DUMP_TARGET", "[Shift+J]") .. ": dump current target")
+    self:addLine(lines, self:getActionKeyLabel("WAILA_DEBUG_MENU", "[Shift+L]") .. ": debug tools menu")
     self:drawLines(lines)
 end

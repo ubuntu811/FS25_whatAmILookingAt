@@ -18,6 +18,7 @@ current binding, not the default.
 | `Left Shift + M` | Toggle the full inspector HUD |
 | `Left Shift + J` | Dump the currently inspected target to `log.txt` (only while HUD is enabled) |
 | `Left Shift + K` | Dump the map's full foliage catalog to `log.txt` |
+| `Left Shift + L` | Debug tools menu (terrain layer dump, density probes - not needed for normal play) |
 
 A small always-on mini panel (vehicle name / foliage / terrain material
 at a glance, plus FPS and scan time) is visible whether or not the full
