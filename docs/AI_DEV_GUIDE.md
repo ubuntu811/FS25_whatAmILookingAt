@@ -52,7 +52,9 @@ find . -name '*.xml' -print0 | xargs -0 -n1 python3 -c \
 
 The XML check exists because a single stray/duplicate closing tag in `modDesc.xml` will pass every Lua check and still hard-fail the game load (`XML_ERROR_MISMATCHED_ELEMENT`) — this bit us for real, once.
 
-`deploy.sh` runs `build.sh` if needed, then `rm -rf` + `unzip` the zip straight into `~/fs25/mods/<ModName>/` as a loose folder (not a zip) so FS25 hot-reloads it without a repackage step every time.
+`deploy.sh` always runs `build.sh` first (unconditionally, not "if the zip is missing" — that conditional version silently redeployed a stale pre-session zip for an entire session once, since a zip already existed on disk and it never re-ran `build.sh`), then `rm -rf` + `unzip` the zip straight into `~/fs25/mods/<ModName>/` as a loose folder (not a zip) so FS25 hot-reloads it without a repackage step every time.
+
+This `rm -rf`+`unzip`/`cp -r` pattern is fine for small script mods like this one (a handful of `.lua`/`.xml` files, nothing to really feel). It does **not** scale to map mods — a map repo can be 1+ GB (terrain textures, i3d assets), and WSL↔Windows filesystem crossing (`/mnt/c`) is slow enough that a full `rm -rf`+`unzip`/`cp -r` on every single edit becomes genuinely painful. For those, swap to `rsync -a --delete` for both the staging copy and the final deploy — only touches what actually changed, instead of blowing away and recopying gigabytes to fix one XML attribute.
 
 **Workflow rule**: after every code edit, run both — don't wait to be asked. In-game testing is the only real verification; local syntax checks only catch a subset of what can go wrong.
 
