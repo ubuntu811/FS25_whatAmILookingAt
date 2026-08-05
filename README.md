@@ -31,8 +31,10 @@ HUD is toggled on - the full HUD slides open underneath it.
 - foliage layers at the target
 - grouped terrain and foliage statistics for a 5×5 m area
 - vehicle/placeable node object where available
+- per-wheel mass and real ground contact force (tire load), where exposed by the engine
 - tree/log/split-shape classification
 - rigid-body type, split state, volume, mass and sleeping state where exposed by the engine
+- current weather (rain scale, time since last rain, temperature, derived isRaining) - full HUD only
 
 The always-on mini panel only runs a lightweight point raycast; the
 heavier 10×10m area scan only runs while the full HUD is toggled on.

@@ -311,6 +311,17 @@ function WailaHud:draw(inspection, areaSize, areaStep)
                 vehicle.wheelIndex, vehicle.wheelCount,
                 WailaUtil.value(vehicle.wheelNodeField), WailaUtil.value(vehicle.wheelNodeId),
                 WailaUtil.value(vehicle.wheelNodeName)), true)
+
+            -- mass = this wheel's own physics mass (WheelPhysics.lua).
+            -- tireLoad = real ground contact force + gravity-weighted mass
+            -- combined (WheelPhysics:getTireLoad, confirmed via WheelAxle's
+            -- real axle-load-balancing use of it) - NOT what drives the
+            -- built-in tire-track visual rut depth, that's a separate
+            -- static terrain attribute. Still a real, useful reading.
+            if vehicle.wheelMass ~= nil or vehicle.wheelTireLoad ~= nil then
+                self:addLine(lines, string.format("  mass=%s  tireLoad=%s",
+                    WailaUtil.value(vehicle.wheelMass), WailaUtil.value(vehicle.wheelTireLoad)))
+            end
         else
             self:addLine(lines, string.format("Wheels: %d", vehicle.wheelCount or 0))
         end

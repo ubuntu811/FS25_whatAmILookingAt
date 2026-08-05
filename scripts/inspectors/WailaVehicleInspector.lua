@@ -219,6 +219,30 @@ function WailaVehicleInspector:inspect(hit, objectInspection)
         end
     end
 
+    -- Confirmed real via base game source (dataS/scripts/vehicles/wheels/
+    -- WheelPhysics.lua's getTireLoad, dataS/scripts/vehicles/wheels/
+    -- WheelAxle.lua's real axle-load-balancing use of it) - combines the
+    -- real getWheelShapeContactForce native with the wheel's own mass.
+    -- NOT what drives the built-in tire-track visual rut depth though -
+    -- that turned out to read a static terrain attribute instead, a
+    -- separate, unrelated value. This is still a real, useful reading on
+    -- its own, just don't assume it's "what makes ruts deeper".
+    local wheelMass = nil
+    local wheelTireLoad = nil
+    if wheelIndex ~= nil then
+        local wheel = wheels[wheelIndex]
+
+        if wheel ~= nil then
+            if wheel.getMass ~= nil then
+                wheelMass = WailaUtil.safeCall(nil, wheel.getMass, wheel)
+            end
+
+            if wheel.physics ~= nil and wheel.physics.getTireLoad ~= nil then
+                wheelTireLoad = WailaUtil.safeCall(nil, wheel.physics.getTireLoad, wheel.physics)
+            end
+        end
+    end
+
     return {
         hitNodeId = hitNodeId,
         hitNodeName = WailaUtil.safeGlobalCall("getName", nil, hitNodeId),
@@ -239,6 +263,8 @@ function WailaVehicleInspector:inspect(hit, objectInspection)
         wheelNodeField = wheelNodeField,
         wheelNodeId = wheelNodeId,
         wheelNodeName = wheelNodeName,
+        wheelMass = wheelMass,
+        wheelTireLoad = wheelTireLoad,
 
         attacherJointCount = #attacherJoints,
         attacherJointIndex = attacherJointIndex,
