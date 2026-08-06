@@ -23,6 +23,17 @@ local TEST_RIG_GRID_LAYERS = {
     "decoFoliage", "decoFoliageEU", "forestPlants", "waterPlants",
     "decoBush", "decoBushUS", "groundFoliage", "forestGrass", "forestBush",
     "meadow",
+    -- Real crop layer names (confirmed via the game install's own
+    -- data/foliage/ folder listing, not guessed) - potato.xml turned out
+    -- to use the exact same <foliageType>/<foliageLayer>/<foliageState>
+    -- schema as meadowEU.xml, same density-map write mechanism, just a
+    -- different layerName. Whether any of these actually resolve on THIS
+    -- map (getIsDecoLayerDefined) is exactly what this grid is for -
+    -- don't assume, read the result.
+    "barley", "beetRoot", "canola", "carrot", "cotton", "grape",
+    "greenBean", "maize", "oat", "oilseedRadish", "olive", "onion",
+    "parsnip", "pea", "potato", "rice", "riceLongGrain", "sorghum",
+    "soybean", "spinach", "sugarBeet", "sugarCane", "sunflower", "wheat",
 }
 local TEST_RIG_GRID_MAX_STATE = {
     forestGrass = 1,

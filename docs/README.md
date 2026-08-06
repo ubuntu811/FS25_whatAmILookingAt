@@ -1,4 +1,4 @@
-# AI drive FS25 mod development
+# A word on AI driven/assisted FS25 mod development
 
 Hey here, this is the actual human speaking :D
 I'm a well seasoned mainly linux system engineer, but I touch code
@@ -14,7 +14,7 @@ in about 2 weeks of work off and on.
 Of course this is about the worst thing someone can do to an AI. 
 Incomplete documentation (at least for this depth of holding my fingers into
 the core engine), a developer who does not know the engine and neither how
-to start with something simple. Let's just dive straight into the engine core
+to start with a simple project. Let's just dive straight into the engine core
 and let's see where we end up. 
 
 Lifelines: Other mods, that touch similar directions in the Engine (credits are in the Readme's).
@@ -22,10 +22,17 @@ And then it's just, either checkout that other mod/git repo locally, or point th
 the github url and make it reason "why this mod works" and "if we can do something similar".
 
 And yea... Then this mod "happened", to be able to basically walk around in the
-world and look at things, to prove we're in the right ballpark with our assumptions. 
+world and look at things, to prove we're in the right ballpark with our assumptions, 
+together with handy debug functions like "please place all defined deco foliage stages
+at my position". Proving the code indeed has a way to place things in the world, before
+having the same thing happening on a random interval all over the map in IW. 
 
-In reality it was mostly Claude telling me "ok start game, please look at that grass patch"
-screenshot WAILA HUD -> Claude "ah i see" -> problem fixed :D:D
+![alt text](../screenshots/foliage_rig.png)
+
+In reality the development cycle was mostly Claude telling me "ok start game, please 
+look at that grass patch" screenshot WAILA HUD, then run this debug function, while
+Claude already had a background monitoring process looking at log.txt. So it would
+usually already have identified and fixed the problem, before I even noticed. 
 
 # Gotchas
 
@@ -51,20 +58,28 @@ AI's in this "worst case scenario".
   days, while being already convoluted enough, that you have a hard time debugging
   manually. 
 
-* chatgpt (paid chat, but without the client) -> better... But still hallucinating.. 
-  And of course constantly drifting context, because up/download a code zip is
-  painful. Possible for simple things, but not for something as complex. 
-
-* claude code (paid) -> the actual breakthrough: Having AI running directly inside the 
-  development environment, allows it to keep its context much better, than a 
-  simple chat. Also claude will consistently rather tell you "I don't think this is
-  possible", until you convince it otherwise with some evidence, than just make 
-  something up. 
+* claude code (paid, with client installed) -> the actual breakthrough: Having 
+  AI running directly inside the  development environment, allows it to keep
+  its context much better, than a simple chat. Also claude will consistently
+  tell you "I don't think this is possible", until you convince it otherwise
+  with some evidence, rather than just make something up that looks impressive,
+  but costs you days to uncover all the hallucinated eastereggs. 
   Chats are perfectly useable, for simple things, where you just 
   want syntactically correct lua code, but you know the engine functions you're 
   calling actually exist. But here, we more or less ended up with a local folder
   full of unzipped "other mods" that were working in the engine in similar corners,
   so the AI would just go search for references in there automatically. 
+
+* chatgpt (free or paid chat depending on volume, but without the client) 
+  -> better... But still hallucinating.. And of course suffering of constantly
+  drifting context, because up/download a code zip is painful. Possible for
+  simple things, but not for something as complex as this. 
+  The area where chatgpt is definitely better than claude code, is creativity. So
+  for the first couple "brainstorming sessions" while you're trying to figure out
+  the scope of what you're trying to do, chatgpt is much more useful.
+  And also it comes with a builtin image generator that claude does not have. 
+  So I will on a regular base use both (or all 3) at the same time, comparing
+  the results is also a way to uncover hallucinations. 
 
 ## Context windows
 
