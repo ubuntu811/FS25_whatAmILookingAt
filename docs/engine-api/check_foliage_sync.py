@@ -2,7 +2,7 @@
 """
 Cross-checks a map's map.xml <decoFoliages>/<paintableFoliages> declarations
 against what the map's own I3D actually backs, and against each declared
-layer's real per-type numDensityMapChannels. Catches the three bug
+layer's real per-type numDensityMapChannels. Catches the four bug
 categories found the hard way in FS25_Estancia_Lapacho_orange (see
 FoliageDensityMap.md in this folder):
 
@@ -19,6 +19,17 @@ FoliageDensityMap.md in this folder):
      instead of erroring or honoring the value. (This is what "the
      annoying bush" turned out to be - forestGrass, numChannels="1"
      declared vs. numDensityMapChannels="4" real.)
+  4. <decoFoliage layerName="X"> that has real FoliageType backing (so it
+     is a genuine fruit/crop, not a decorative-only layer) but whose
+     descriptor file is NOT already among the map's registered
+     <fruitTypes> - declaring it forces the engine to allocate a brand
+     new type index in the density map, and that allocation has a hard,
+     fixed ceiling. Exceeding it throws inside an async loading callback
+     (GrowthSystem.lua "attempt to index nil with 'isValid'") which can
+     hang the whole map load. This is exactly what "onion" did on
+     FS25_Estancia_Lapacho_orange - real backing, never registered as a
+     fruitType, freshly allocated a slot that pushed the map over the
+     limit.
 
 Usage:
     python3 check_foliage_sync.py /path/to/MapMod/maps/map.xml
@@ -61,7 +72,36 @@ def parse_map_xml(map_xml_path):
         if name:
             paintable_layers.add(name)
 
-    return i3d_filename, deco_layers, mappings, paintable_layers
+    # <fruitTypes filename="maps/config/maps_fruitTypes.xml"/> points at an
+    # external file with the real registered list; map.xml can also declare
+    # <fruitType filename="..."/> entries inline (e.g. meadow). Kept as two
+    # separate lists (rather than guessed apart by filename pattern) since
+    # they resolve differently: refs need a second parse pass, direct
+    # entries are already the descriptor path.
+    fruit_type_external_refs = []
+    fruit_type_direct_filenames = []
+    for el in root.iter("fruitTypes"):
+        ref = el.get("filename")
+        if ref:
+            fruit_type_external_refs.append(ref)
+        for ftype in el.findall("fruitType"):
+            fname = ftype.get("filename")
+            if fname:
+                fruit_type_direct_filenames.append(fname)
+
+    return i3d_filename, deco_layers, mappings, paintable_layers, fruit_type_external_refs, fruit_type_direct_filenames
+
+
+def parse_external_fruit_types(ref_filename, mod_root, game_install):
+    """Follows a <fruitTypes filename="..."/> reference to an external XML
+    file (e.g. maps/config/maps_fruitTypes.xml) and collects its own
+    <fruitType filename="..."/> entries. Returns [] if the file can't be
+    resolved/parsed (e.g. it's a $data/ path and --game-install wasn't given)."""
+    path = resolve_descriptor_path(ref_filename, mod_root, game_install)
+    if path is None or not path.exists():
+        return []
+    tree = ET.parse(path)
+    return [el.get("filename") for el in tree.getroot().iter("fruitType") if el.get("filename")]
 
 
 def parse_i3d(i3d_path):
@@ -122,13 +162,28 @@ def main():
     # relative to map.xml's own location.
     mod_root = map_dir.parent
 
-    i3d_filename, deco_layers, mappings, paintable_layers = parse_map_xml(map_xml_path)
+    (i3d_filename, deco_layers, mappings, paintable_layers,
+     fruit_type_external_refs, fruit_type_direct_filenames) = parse_map_xml(map_xml_path)
     i3d_path = mod_root / i3d_filename
     if not i3d_path.exists():
         print(f"ERROR: I3D not found at {i3d_path}")
         sys.exit(1)
 
     foliage_types, files = parse_i3d(i3d_path)
+
+    # Registered fruit types are identified by resolved descriptor path, not
+    # by name - avoids the exact sugarbeet/sugarBeet case-sensitivity trap
+    # this map already hit once. Follows external <fruitTypes filename="..."/>
+    # references (e.g. maps_fruitTypes.xml) in addition to inline entries.
+    all_fruit_type_filenames = list(fruit_type_direct_filenames)
+    for ref in fruit_type_external_refs:
+        all_fruit_type_filenames.extend(parse_external_fruit_types(ref, mod_root, args.game_install))
+
+    registered_fruit_paths = set()
+    for fname in all_fruit_type_filenames:
+        resolved = resolve_descriptor_path(fname, mod_root, args.game_install)
+        if resolved is not None:
+            registered_fruit_paths.add(resolved)
 
     problems = 0
 
@@ -149,6 +204,16 @@ def main():
         descriptor_path = resolve_descriptor_path(filename, map_dir, args.game_install)
         real_channels = get_real_num_channels(descriptor_path)
 
+        # Real backing but not already a registered fruitType: this layer
+        # will make the engine allocate a brand new type index the first
+        # time it loads. That allocation has a hard ceiling - see category
+        # 4 in the module docstring. Checked by resolved path, not name.
+        unregistered_new_type = (
+            descriptor_path is not None
+            and descriptor_path.exists()
+            and descriptor_path not in registered_fruit_paths
+        )
+
         if real_channels is None:
             note = (" (pass --game-install to check $data/ paths)"
                     if filename.startswith("$data/") and args.game_install is None else "")
@@ -157,6 +222,11 @@ def main():
             print(f"  [NUMCHANNELS MISMATCH] '{layer_name}': map.xml declares numChannels={declared_channels}, "
                   f"real descriptor declares numDensityMapChannels={real_channels} "
                   f"- states {declared_channels} to {real_channels - 1} will silently clamp on write")
+            problems += 1
+        elif unregistered_new_type:
+            print(f"  [NEW FRUIT TYPE] '{layer_name}' has real backing but is not in the map's registered "
+                  f"fruitTypes - declaring it will allocate a fresh density-map type index, which can "
+                  f"exceed a hard ceiling and hang map load (this is exactly what 'onion' did)")
             problems += 1
         else:
             print(f"  [OK] '{layer_name}': numChannels={declared_channels} matches real descriptor ({real_channels})")
