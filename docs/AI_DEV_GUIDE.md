@@ -8,9 +8,21 @@ How this repo (and its companion [FS25_whatAmILookingAt](https://github.com/ubun
 
 - **Windows + Steam**: Farming Simulator 25 installed normally via Steam.
 - **WSL2** (Ubuntu) on the same machine, with the Windows C: drive mounted at `/mnt/c`.
-- **Two different folders, do not confuse them**:
-  - Game **install** (read-only reference material): `/mnt/c/Program Files (x86)/Steam/steamapps/common/Farming Simulator 25/`
-  - Game **user data** (mods, saves, logs, settings): `/mnt/c/Users/<you>/Documents/My Games/FarmingSimulator2025/` — usually symlinked to something like `~/fs25/` inside WSL for convenience.
+- **Three different folders, do not confuse them** - this setup symlinks
+  all three into the WSL home directory:
+  - Game **install** (read-only reference material): `~/fs25_bin` →
+    `/mnt/c/Program Files (x86)/Steam/steamapps/common/Farming Simulator 25/`
+    - binaries, `sdk/debugger/scriptBinding.xml` (every Lua-callable
+      native), `shared/xml/schema/*.xsd` (modDesc.xsd, mission00.xsd, etc.).
+  - Game **user data** (mods, saves, logs, settings): `~/fs25` →
+    `/mnt/c/Users/<you>/Documents/My Games/FarmingSimulator2025/` -
+    `savegameN/`, installed `mods/`, `modSettings/`, `log.txt`.
+  - Dev **tools/references** (GIANTS Texture Tool, decompilers, PDFs,
+    anything NOT the game itself): `~/fs25_resources` →
+    `/mnt/c/Users/<you>/Documents/fs25_resources/`. Deliberately excludes
+    GIANTS Editor - that stays wherever it's installed
+    (`/mnt/c/Program Files/GIANTS Software/GIANTS_Editor_<version>/`),
+    it's a Windows GUI app, nothing to consolidate.
 - **Claude Code** is installed on Windows, not inside WSL - there's no `apt install claude-code`. It gets WSL filesystem/shell access through Claude Code's own WSL integration setting (an explicit opt-in, not automatic). With that enabled, it edits files under `~/my_mods/<ModName>/` (a git repo per mod), building, and deploying straight into `~/fs25/mods/<ModName>/` as a loose unzipped folder for FS25's hot-reload.
 
 Finding the install path the first time: don't blind-`find` all of `/mnt/c` (WSL↔Windows crossing is slow, real timeouts happen). Target a known filename instead:
@@ -95,6 +107,13 @@ The game ships real, unpacked reference material. Use it instead of inferring be
 - **XML schemas** (map.xml, modDesc.xml, vehicle XML, etc.): `<install>/shared/xml/schema/*.xsd` — e.g. `mission00.xsd` is the authoritative map.xml structure.
 - **Every Lua-callable engine function**, with real params/types: `<install>/sdk/debugger/scriptBinding.xml`.
 - **Real, currently-installed reference mods**: when unsure whether a pattern is genuinely supported, grep an existing working mod's actual source rather than guessing (e.g. `FS25_AdditionalContracts`'s own `InGameMenu.onMenuOpened` hook confirmed the real settings-page injection point after a first guess, `BaseMission.loadMapFinished`, silently rendered nothing).
+- **When even scriptBinding.xml doesn't have it**: `~/my_mods/fs-utils` (a
+  Rust CLI toolkit, not prebuilt - `cargo build --release -p <tool>`
+  first) can unpack `.gar`/`.dlc` archives (`fs-unpack`) and decompile the
+  base game's own Lua/Luau bytecode straight out of them
+  (`fs-luau-decompile dataS.gar/scripts/... `) - useful for classes like
+  `SavegameController` that are pure Lua, not native engine bindings, so
+  they never appear in scriptBinding.xml at all.
 
 ## 5. The debug-loop pattern
 
