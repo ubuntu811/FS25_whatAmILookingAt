@@ -150,6 +150,14 @@ function FS25WhatAmILookingAt:onDumpEnvironment()
     self.debugTools:dumpEnvironment()
 end
 
+function FS25WhatAmILookingAt:onDumpPlayerAndHandTool()
+    self.debugTools:dumpPlayerAndHandTool()
+end
+
+function FS25WhatAmILookingAt:onDumpHandToolNodeTree()
+    self.debugTools:dumpHandToolNodeTree()
+end
+
 -- Same OptionDialog pattern as IW's own debug menu (ImmersiveWeathering:
 -- showDebugMenu) - a real base-game GUI class (dataS/gui/dialogs/, same
 -- family as YesNoDialog/TextInputDialog), not a dependency between the
@@ -167,6 +175,8 @@ function FS25WhatAmILookingAt:showDebugMenu()
         { "Dump density probe", self.onDumpDensityProbe },
         { "Dump ground layer dataPlane probe", self.onDumpGroundDensityProbe },
         { "Dump environment/weather state", self.onDumpEnvironment },
+        { "Dump player + held hand tool position", self.onDumpPlayerAndHandTool },
+        { "Dump held hand tool's live scene-graph tree", self.onDumpHandToolNodeTree },
     }
 
     local options = {}

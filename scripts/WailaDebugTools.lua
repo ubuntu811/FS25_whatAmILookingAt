@@ -355,3 +355,113 @@ function WailaDebugTools:dumpEnvironment()
     dumpTable(g_currentMission.environment, "environment.", 2, {})
     log("[Environment] --- end ---")
 end
+
+-- Public: player world position/facing + the currently-held hand tool's
+-- own real rootNode world position, side by side - built specifically to
+-- answer "is my held item rendering near me, or off in space somewhere,"
+-- which no amount of staring at i3d node paths can answer on its own.
+-- g_localPlayer (confirmed real, used directly in base game's own
+-- TensionBelts.lua) and Player.rootNode/currentHandTool (both plain
+-- fields, NOT the --#debug-gated DEBUG_DISPLAY_FLAG.HANDTOOLS overlay -
+-- that one's dev-build-only and stripped from the retail game, confirmed
+-- by every reference to it being commented out with --#debug in the
+-- extracted source). HandTool.rootNode is the exact same field
+-- HandTool.lua itself uses when it link()s the tool under the player's
+-- hand/camera node, so this is reading the real, live, post-attachment
+-- position, not a guess.
+function WailaDebugTools:dumpPlayerAndHandTool()
+    if g_localPlayer == nil then
+        log("[Compass] g_localPlayer is nil")
+        return
+    end
+
+    if g_localPlayer.rootNode == nil then
+        log("[Compass] g_localPlayer.rootNode is nil")
+        return
+    end
+
+    local px, py, pz = getWorldTranslation(g_localPlayer.rootNode)
+    local fx, fy, fz = localDirectionToWorld(g_localPlayer.rootNode, 0, 0, 1)
+    log("[Compass] player pos=(%.3f %.3f %.3f) facing=(%.3f %.3f %.3f)", px, py, pz, fx, fy, fz)
+
+    local handTool = g_localPlayer.currentHandTool
+    if handTool == nil then
+        log("[Compass] not currently holding any hand tool")
+        return
+    end
+
+    log("[Compass] holding: %s", tostring(handTool.typeName))
+
+    if handTool.rootNode == nil then
+        log("[Compass] handTool.rootNode is nil")
+        return
+    end
+
+    local hx, hy, hz = getWorldTranslation(handTool.rootNode)
+    local dx, dy, dz = hx - px, hy - py, hz - pz
+    local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+    log("[Compass] handTool rootNode pos=(%.3f %.3f %.3f)", hx, hy, hz)
+    log("[Compass] offset from player = (%.3f %.3f %.3f), distance=%.3fm", dx, dy, dz, distance)
+end
+
+-- Public: recursively dumps the LIVE scene-graph children of the
+-- currently-held hand tool's rootNode, right now, in the running game -
+-- not the static i3d file on disk. HandTool.lua's own onLoad runs every
+-- node it considers a "component" through I3DUtil.loadI3DComponents,
+-- re-parents each one straight to getRootNode() (the scene root, NOT a
+-- child of rootNode anymore), and explicitly hides it - separately from
+-- rootNode's own visibility toggle, which is the only thing later
+-- setVisibility(self.rootNode, true) calls touch. If the visible mesh
+-- got swept up as a "component", it would have silently vanished from
+-- underneath rootNode entirely - this walk is how we'd actually see
+-- that happening, since I3DUtil.lua's own exact "what counts as a
+-- component" rule isn't in the extracted source to just read.
+local function dumpNodeTreeRecursive(node, depth, maxDepth)
+    if node == nil or depth > maxDepth then
+        return
+    end
+
+    local indent = string.rep("  ", depth)
+    local ok, name = pcall(getName, node)
+    local okVis, visible = pcall(getVisibility, node)
+    local okPos, x, y, z = pcall(getWorldTranslation, node)
+
+    log(
+        "[HandToolTree] %s%s visible=%s pos=%s",
+        indent,
+        ok and tostring(name) or "?",
+        okVis and tostring(visible) or "?",
+        okPos and string.format("(%.3f %.3f %.3f)", x, y, z) or "?"
+    )
+
+    local okCount, numChildren = pcall(getNumOfChildren, node)
+    if not okCount then
+        return
+    end
+
+    for i = 0, numChildren - 1 do
+        local okChild, child = pcall(getChildAt, node, i)
+        if okChild then
+            dumpNodeTreeRecursive(child, depth + 1, maxDepth)
+        end
+    end
+end
+
+function WailaDebugTools:dumpHandToolNodeTree()
+    if g_localPlayer == nil or g_localPlayer.currentHandTool == nil then
+        log("[HandToolTree] not currently holding any hand tool")
+        return
+    end
+
+    local handTool = g_localPlayer.currentHandTool
+    log("[HandToolTree] holding: %s", tostring(handTool.typeName))
+
+    if handTool.rootNode == nil then
+        log("[HandToolTree] handTool.rootNode is nil")
+        return
+    end
+
+    log("[HandToolTree] --- live scene-graph under rootNode ---")
+    dumpNodeTreeRecursive(handTool.rootNode, 0, 6)
+    log("[HandToolTree] --- end ---")
+end
