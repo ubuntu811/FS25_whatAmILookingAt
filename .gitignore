@@ -3,3 +3,4 @@ chatgpt/
 claude/
 build/*.zip
 *.swp
+__pycache__/
