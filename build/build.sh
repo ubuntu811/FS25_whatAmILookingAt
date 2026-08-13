@@ -30,9 +30,18 @@ echo "=== sanity check xml files ==="
 find . -name '*.xml' -print0 | xargs -0 -n1 python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])'
 
 echo "--> Copying production files to staging area..."
-# Copy the core runtime logic and metadata
-for i in icon.dds scripts/ l10n/ modDesc.xml; do 
-  cp -r "$i" "$BUILD_DIR/$i"
+# Copy the core runtime logic and metadata. Existence-checked, not assumed -
+# l10n/ is empty (all <l10n> text lives inline in modDesc.xml) and git does
+# not track empty directories, so a fresh clone never has it at all. An
+# unconditional `cp -r l10n/` only ever worked locally, where the empty dir
+# still physically exists on disk from before this was noticed - it fails
+# on any real fresh checkout, which is exactly what caught it (first CI run).
+for i in icon.dds scripts/ l10n/ modDesc.xml; do
+  if [ -e "$i" ]; then
+    cp -r "$i" "$BUILD_DIR/$i"
+  else
+    echo "    (Skipping missing/empty: $i)"
+  fi
 done
 
 # 3. Compile the production archive
