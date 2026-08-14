@@ -381,6 +381,27 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         end
         self:addLine(lines, "Foliage here: " .. (#names > 0 and table.concat(names, ", ") or "<empty>"))
 
+        -- Raw field state, not derived "needs X" verdicts - same philosophy
+        -- as the Ground/Foliage lines above, real confirmed numbers, human
+        -- reads them. field is nil off any registered field (most terrain).
+        local field = inspection.field
+        if field ~= nil then
+            -- fieldId nil means real, tilled field ground with no registered
+            -- Field object behind it (tillage creates/expands field ground
+            -- independent of the map's fixed field polygons) -- say so
+            -- rather than showing area=0.00ha, which would read as "zero
+            -- area" instead of "not tracked as a Field at all".
+            if field.fieldId ~= nil then
+                self:addLine(lines, string.format("FIELD %s  area=%.2fha  owner=%s", WailaUtil.value(field.fieldId), field.areaHa or 0, WailaUtil.value(field.ownerFarmId)), true)
+            else
+                self:addLine(lines, "FIELD (unregistered -- tilled ground, no map-defined Field object)", true)
+            end
+            self:addLine(lines, string.format("Crop: %s  growth=%s(%s)", WailaUtil.value(field.fruitTypeName), WailaUtil.value(field.growthStateName), WailaUtil.value(field.growthState)))
+            self:addLine(lines, string.format("Ground: %s  plow=%s/%s  roller=%s  stubble=%s", WailaUtil.value(field.groundTypeName), WailaUtil.value(field.plowLevel), WailaUtil.value(field.maxPlowLevel), WailaUtil.value(field.rollerLevel), WailaUtil.value(field.stubbleShredLevel)))
+            self:addLine(lines, string.format("Weed: state=%s weededState=%s  stone=%s  grassOnly=%s", WailaUtil.value(field.weedState), WailaUtil.value(field.weededState), WailaUtil.value(field.stoneLevel), WailaUtil.bool(field.grassMissionOnly)))
+            self:addLine(lines, string.format("Spray: %s  level=%s/%s  lime=%s/%s", WailaUtil.value(field.sprayTypeName), WailaUtil.value(field.sprayLevel), WailaUtil.value(field.maxSprayLevel), WailaUtil.value(field.limeLevel), WailaUtil.value(field.maxLimeLevel)))
+        end
+
         self:addLine(lines, string.format("AREA %.0fx%.0fm / step %.2fm", areaSize, areaSize, areaStep), true)
 
         if inspection.terrainArea ~= nil then

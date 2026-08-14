@@ -11,6 +11,7 @@ function FS25WhatAmILookingAt:loadMap()
     self.foliageInspector = WailaFoliageInspector.new()
     self.objectInspector = WailaObjectInspector.new()
     self.vehicleInspector = WailaVehicleInspector.new()
+    self.fieldInspector = WailaFieldInspector.new()
     self.hud = WailaHud.new()
     self.debugTools = WailaDebugTools.new()
 
@@ -309,11 +310,13 @@ function FS25WhatAmILookingAt:updatePointInspection()
     if self.current.vehicle == nil then
         self.current.terrain = self.terrainInspector:inspectPoint(hit.x, hit.y, hit.z)
         self.current.foliagePoint = self.foliageInspector:inspectPoint(hit.x, hit.z)
+        self.current.field = self.fieldInspector:inspectPoint(hit.x, hit.y, hit.z)
     else
         self.current.terrain = nil
         self.current.foliagePoint = nil
         self.current.terrainArea = nil
         self.current.foliageArea = nil
+        self.current.field = nil
     end
 end
 
