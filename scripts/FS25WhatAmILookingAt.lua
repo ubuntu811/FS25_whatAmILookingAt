@@ -123,12 +123,6 @@ function FS25WhatAmILookingAt:setupComponents()
         { label = "Dump environment/weather state", run = function() mod:onDumpEnvironment() end },
         { label = "Dump player + held hand tool position", run = function() mod:onDumpPlayerAndHandTool() end },
         { label = "Dump held hand tool's live scene-graph tree", run = function() mod:onDumpHandToolNodeTree() end },
-        -- Not field-specific (any declared-area type at the cursor) --
-        -- lives here rather than in Field or Declared Areas, since the
-        -- Areas tab is browse-by-list (a different item shape: real
-        -- WailaDeclaredArea objects, not {label, run}), and this is a
-        -- quick at-cursor action, not a list lookup.
-        { label = "Delete declared area here", run = function() mod:onDeleteAreaHere() end },
         -- Best-effort script reload, not a real map/savegame reload --
         -- see Waila.reloadAll/Waila.registerReloadable. Same console
         -- command also works from outside the HUD: wailaReload.
@@ -165,7 +159,25 @@ function FS25WhatAmILookingAt:setupComponents()
         icon = Utils.getFilename("gui/icons/declared-areas.dds", FS25WhatAmILookingAt.MOD_DIRECTORY),
         getItems = Waila.getAllAreas,
         describeItem = function(area) return area.type, describeAreaPosition(area) end,
-        buttons = { { label = "Delete", callback = Waila.unregisterArea } },
+        -- Runs the area's own cleanup (if it or its type registered one,
+        -- e.g. the foliage test rig clearing what it placed) before
+        -- unregistering it -- Delete used to only remove WAILA's own
+        -- tracking, leaving whatever the area actually placed in the
+        -- world behind. Waila.resolveAreaField, not a bare area.
+        -- deleteCallback read -- an area restored from waila.xml never
+        -- carries its own function fields, only a type-level
+        -- registration (Waila.registerAreaType) survives that.
+        buttons = { { label = "Delete", callback = function(area)
+            -- Real lifesign, not a temp diagnostic -- confirms which
+            -- function actually ran, independent of what the hub's UI
+            -- displayed.
+            log("[DeclaredArea] Delete callback running for type='%s' wailaID=%s", tostring(area.type), tostring(area.wailaID))
+            local deleteCallback = Waila.resolveAreaField(area, "deleteCallback")
+            if deleteCallback ~= nil then
+                deleteCallback(area)
+            end
+            Waila.unregisterArea(area)
+        end } },
     })
 
     -- Published via g_currentMission, not the bare Waila global -- a
@@ -266,41 +278,17 @@ end
 -- Self-test handlers for WailaAreaTracker.AREA_ENTERED/AREA_LEFT -- see
 -- the subscriptions in loadMap(). Player-only right now (see
 -- WailaAreaTracker.lua), so no entity-name branching needed here unlike
--- onVehicleLeftField above.
--- Activates the shared WAILA_AREA_ACTION binding (see registerActionEvents)
--- for this specific area if it declared one (area.actionLabel ~= nil),
--- storing which area to act on when the key is actually pressed --
--- onAreaAction below reads self.currentAreaAction, not typeName/area
--- directly, since the input callback fires with no area context of its
--- own.
+-- onVehicleLeftField above. Used to also drive a dedicated
+-- WAILA_AREA_ACTION keybind's text/active state; that bind was removed
+-- as a pure duplicate of the Declared Areas hub tab's own per-item
+-- action button (Waila.resolveAreaField(area, "actionCallback"), same
+-- resolution, reachable there without needing to stand in the area).
 function FS25WhatAmILookingAt:onAreaEntered(typeName, area)
     log("[AreaTracker self-test] player entered area '%s'", typeName)
-
-    if self.areaActionEventId ~= nil and area ~= nil and area.actionLabel ~= nil then
-        self.currentAreaAction = area
-        g_inputBinding:setActionEventText(self.areaActionEventId, area.actionLabel)
-        g_inputBinding:setActionEventTextVisibility(self.areaActionEventId, true)
-        g_inputBinding:setActionEventActive(self.areaActionEventId, true)
-    end
 end
 
 function FS25WhatAmILookingAt:onAreaLeft(typeName, area)
     log("[AreaTracker self-test] player left area '%s'", typeName)
-
-    if self.areaActionEventId ~= nil and area == self.currentAreaAction then
-        self.currentAreaAction = nil
-        g_inputBinding:setActionEventTextVisibility(self.areaActionEventId, false)
-        g_inputBinding:setActionEventActive(self.areaActionEventId, false)
-    end
-end
-
--- WAILA_AREA_ACTION's own callback -- fires whenever the key is pressed
--- while active, which onAreaEntered/onAreaLeft above only allow while
--- self.currentAreaAction is set to an area that actually declared one.
-function FS25WhatAmILookingAt:onAreaAction()
-    if self.currentAreaAction ~= nil and self.currentAreaAction.actionCallback ~= nil then
-        self.currentAreaAction.actionCallback(self.currentAreaAction)
-    end
 end
 
 function FS25WhatAmILookingAt:registerActionEvents()
@@ -326,17 +314,6 @@ function FS25WhatAmILookingAt:registerActionEvents()
         g_inputBinding:setActionEventTextVisibility(dumpId, false)
     end
 
-    local _, catalogId = g_inputBinding:registerActionEvent(
-        InputAction.WAILA_DUMP_FOLIAGE_CATALOG,
-        self,
-        self.onDumpFoliageCatalog,
-        false, true, false, true, nil, true
-    )
-    if catalogId ~= nil then
-        g_inputBinding:setActionEventTextPriority(catalogId, GS_PRIO_LOW)
-        g_inputBinding:setActionEventTextVisibility(catalogId, false)
-    end
-
     local _, debugHubId = g_inputBinding:registerActionEvent(
         InputAction.WAILA_DEBUG_HUB,
         self,
@@ -346,21 +323,6 @@ function FS25WhatAmILookingAt:registerActionEvents()
     if debugHubId ~= nil then
         g_inputBinding:setActionEventTextPriority(debugHubId, GS_PRIO_LOW)
         g_inputBinding:setActionEventTextVisibility(debugHubId, false)
-    end
-
-    -- startActive=false, unlike the others above -- this one should do
-    -- nothing at all until onAreaEntered activates it for a specific
-    -- declared area (see there). Text visibility follows the same
-    -- activation, set per-area, not fixed here.
-    local _, areaActionId = g_inputBinding:registerActionEvent(
-        InputAction.WAILA_AREA_ACTION,
-        self,
-        self.onAreaAction,
-        false, true, false, false, nil, true
-    )
-    self.areaActionEventId = areaActionId
-    if areaActionId ~= nil then
-        g_inputBinding:setActionEventTextPriority(areaActionId, GS_PRIO_NORMAL)
     end
 end
 
@@ -400,20 +362,6 @@ function FS25WhatAmILookingAt:onPlaceFoliageTestRig()
     end
 
     self.debugTools:placeFoliageTestRig(self.current.hit.x, self.current.hit.z)
-end
-
-function FS25WhatAmILookingAt:onDeleteAreaHere()
-    if self.current == nil or self.current.hit == nil then
-        log("[DeclaredArea] No current terrain target")
-        return
-    end
-
-    local removedTypes = Waila.deleteAreasAt(self.current.hit.x, self.current.hit.z)
-    if #removedTypes == 0 then
-        log("[DeclaredArea] Nothing declared here to delete")
-    else
-        log("[DeclaredArea] Deleted: %s", table.concat(removedTypes, ", "))
-    end
 end
 
 function FS25WhatAmILookingAt:onDumpTerrainLayers()

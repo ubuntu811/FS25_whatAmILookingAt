@@ -52,28 +52,29 @@
         </ThreePartBitmap>
     </GuiElement>
 
-    <!-- Third column: the selected item's actions (tab.buttons), as
-         selectable rows instead of a fixed-count footer button row;
-         same reasoning as ditching the fixed tab-button row for the
-         topic list: no cap on how many actions a tab can offer, and one
-         consistent "select a row" interaction across all three columns
-         (select a topic -> select an item -> select an action, which
-         runs immediately). Anchored from the RIGHT edge instead of an
-         offset from the left, same dual-panel technique
+    <!-- Third column: the selected item's actions (tab.buttons); FIXED
+         BUTTON SLOTS, not a SmoothList. Confirmed live (real, repeated,
+         multi-test evidence): a SmoothList conflates "select" (move the
+         highlight) with "activate", and a genuine click on a
+         non-default row kept running whatever was PREVIOUSLY selected
+         instead of the clicked one; a real engine-level ambiguity in
+         click-vs-select semantics, not something fixable from this side
+         reliably. A plain Button's onClick has been rock solid all
+         session (Back, every earlier footer button) with none of that
+         ambiguity, and this list is always small/bounded (typically
+         1-4 actions per tab) unlike the genuinely open-ended topic
+         list, so a fixed-slot approach (same idea as the old footer,
+         just more headroom) is the right tool here, not a limitation.
+         Anchored from the RIGHT edge, same dual-panel technique
          FS25_MapObjectsHider uses for its own two side-by-side preview
-         boxes (one anchorStretchingYLeft, one anchorStretchingYRight),
-         not a new pattern. -->
+         boxes. -->
     <GuiElement profile="waila_hubActionsBox">
-        <Bitmap profile="fs25_subCategoryStartClipper" name="actionStartClipper"/>
-        <Bitmap profile="fs25_subCategoryStopClipper" name="actionEndClipper"/>
-        <SmoothList profile="fs25_subCategoryList" id="actionList" startClipperElementName="actionStartClipper" endClipperElementName="actionEndClipper">
-            <ListItem profile="waila_hubFlatListItem">
-                <Text profile="waila_hubActionLabel" name="label"/>
-            </ListItem>
-        </SmoothList>
-        <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
-            <Slider profile="fs25_listSlider" dataElementId="actionList"/>
-        </ThreePartBitmap>
+        <Button profile="waila_hubActionButton" position="0px -20px" id="actionButton1" onClick="onClickAction1" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -160px" id="actionButton2" onClick="onClickAction2" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -300px" id="actionButton3" onClick="onClickAction3" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -440px" id="actionButton4" onClick="onClickAction4" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -580px" id="actionButton5" onClick="onClickAction5" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -720px" id="actionButton6" onClick="onClickAction6" text=""/>
     </GuiElement>
 
     <BoxLayout profile="fs25_buttonBox" id="buttonsPanel">
@@ -114,14 +115,17 @@
             <imageSelectedSliceId value="gui.colorPreset"/>
             <imageSelectedColor value="$preset_fs25_colorMainHighlight"/>
         </Profile>
-        <!-- textMaxNumLines="2" + a percentage size was reverted here;
+        <!-- textMaxNumLines="2" (wrap) plus a PERCENTAGE size together
              reproduced a real stack overflow inside the engine's own
-             TextElement update/height code on a clean load, not just on
-             reload. Back to single-line truncation (no size/
-             textMaxNumLines override) until a safer way to get wrapping
-             is confirmed; a crash is worse than a truncated label. -->
+             TextElement code on a clean load. Staying in single-line
+             truncate mode (no textMaxNumLines) here, but there's plenty
+             of unused row width, so just widening the text with a fixed
+             pixel size lets most labels fit on one line without
+             truncating at all; no wrap, so none of the crash-prone
+             code path is touched. -->
         <Profile name="waila_hubItemPrimary" extends="fs25_textDarkHighlight" with="anchorBottomLeft">
             <position value="30px 60px"/>
+            <size value="700px 60px"/>
             <textSize value="26px"/>
             <textVerticalAlignment value="bottom"/>
             <textColor value="$preset_fs25_colorMainHighlight"/>
@@ -140,13 +144,22 @@
             <size value="20% 950px"/>
             <position value="-30px 0px"/>
         </Profile>
-        <Profile name="waila_hubActionLabel" extends="fs25_textDarkHighlight" with="anchorBottomLeft">
-            <position value="30px 60px"/>
-            <textSize value="26px"/>
-            <textVerticalAlignment value="bottom"/>
-            <textColor value="$preset_fs25_colorMainHighlight"/>
-            <textFocusedColor value="$preset_fs25_colorMainLight"/>
-            <textHighlightedColor value="$preset_fs25_colorMainHighlight"/>
+        <!-- Extends fs25_wideButton directly, NOT buttonOK; confirmed
+             via decompiled ButtonElement.lua + guiProfiles.xml: buttonOK
+             bakes in inputAction="MENU_ACCEPT" on its OWN definition
+             (not inherited from fs25_wideButton), which registers a real
+             input-binding event in ButtonElement:onOpen(). Every button
+             using that profile independently subscribes to the SAME
+             shared Enter/confirm action; with multiple actionButtons
+             visible at once, pressing Enter fired ALL of them
+             simultaneously (confirmed live: "2 buttons executed from one
+             press", not a focus-sync issue at all; handleFocus only
+             governs mouse-hover highlight state, unrelated to this).
+             fs25_wideButton gives the same visual style with no
+             inputAction at all, so these are mouse-click-only by
+             construction, not by trying to suppress an inherited one. -->
+        <Profile name="waila_hubActionButton" extends="fs25_wideButton" with="anchorTopLeft">
+            <size value="90% 120px"/>
         </Profile>
     </GUIProfiles>
 </GUI>

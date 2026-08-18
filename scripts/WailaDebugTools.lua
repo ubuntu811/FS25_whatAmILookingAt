@@ -77,7 +77,25 @@ local GROUND_LAYER_NAMES = {
 }
 
 function WailaDebugTools.new()
-    return setmetatable({}, WailaDebugTools_mt)
+    local self = setmetatable({}, WailaDebugTools_mt)
+
+    -- Registered once per TYPE, not per area instance -- see
+    -- Waila.registerAreaType's own comment for why (an area restored
+    -- from waila.xml has no live function fields of its own, only its
+    -- type string survives). Covers every waila_foliage_testrig area
+    -- regardless of whether it was just placed or restored from a save.
+    Waila.registerAreaType(WailaDebugTools.TEST_RIG_AREA_TYPE, {
+        actionLabel = "Reset foliage test rig",
+        actionCallback = function(area)
+            self:resetFoliageTestRig(area.metadata.originX, area.metadata.originZ)
+        end,
+        deleteCallback = function(area)
+            self:clearFoliageTestRigGrid(area.metadata.originX, area.metadata.originZ)
+            self:clearConcreteBorder(area.metadata.originX, area.metadata.originZ)
+        end,
+    })
+
+    return self
 end
 
 function WailaDebugTools:getTerrainLayerIdByName(name)
@@ -280,8 +298,43 @@ function WailaDebugTools:dumpGroundDensityProbe(hx, hy, hz)
     end
 end
 
+-- Shared by placeFoliageTestRig (paints the concrete outline) and
+-- clearConcreteBorder (repaints dirt over the exact same outline on
+-- delete) -- was duplicated inline in placeFoliageTestRig until
+-- clearConcreteBorder needed the identical bounds.
+local function computeTestRigBorderBounds(originX, originZ)
+    local borderMargin = 1.0
+    local borderMinX = originX - borderMargin
+    local borderMaxX = originX + TEST_RIG_GRID_STATES * TEST_RIG_SPACING + borderMargin
+    local borderMinZ = originZ - borderMargin
+    local borderMaxZ = originZ + (#TEST_RIG_GRID_LAYERS - 1) * TEST_RIG_SPACING + borderMargin
+    return borderMinX, borderMaxX, borderMinZ, borderMaxZ
+end
+
 function WailaDebugTools:placeFoliageTestRig(hx, hz)
     log("[TestRig] --- mapping grid (layer rows x state 0-15 columns) ---")
+
+    -- Declared-area dogfood case: re-placing the rig should replace its
+    -- own area, not accumulate a fresh stale rectangle on top of every
+    -- past placement. Cleared by type (WailaAreaIndex:clear()), not via a
+    -- remembered instance-field reference -- an area restored from
+    -- waila.xml on load has no such reference pointing to it yet, but
+    -- clearing by type name catches it correctly regardless.
+    --
+    -- BEFORE placing anything, not after -- confirmed live (Reset ending
+    -- up as a bare dirt patch, no rig at all): this used to run AFTER
+    -- the grid/border were freshly painted below, so on a Reset (same
+    -- origin as the area being replaced) it immediately wiped the stuff
+    -- this same function had just placed a few lines earlier.
+    local existingIndex = Waila.indices[WailaDebugTools.TEST_RIG_AREA_TYPE]
+    if existingIndex ~= nil and existingIndex.className == WailaAreaIndex.MARKER then
+        for _, existingArea in ipairs(existingIndex:getAll()) do
+            self:clearFoliageTestRigGrid(existingArea.metadata.originX, existingArea.metadata.originZ)
+            self:clearConcreteBorder(existingArea.metadata.originX, existingArea.metadata.originZ)
+        end
+        existingIndex:clear()
+    end
+
     local concreteLayerId = self:getTerrainLayerIdByName("CONCRETEINDUSTRIAL")
 
     for row, layerName in ipairs(TEST_RIG_GRID_LAYERS) do
@@ -300,11 +353,7 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
         end
     end
 
-    local borderMargin = 1.0
-    local borderMinX = hx - borderMargin
-    local borderMaxX = hx + TEST_RIG_GRID_STATES * TEST_RIG_SPACING + borderMargin
-    local borderMinZ = hz - borderMargin
-    local borderMaxZ = hz + (#TEST_RIG_GRID_LAYERS - 1) * TEST_RIG_SPACING + borderMargin
+    local borderMinX, borderMaxX, borderMinZ, borderMaxZ = computeTestRigBorderBounds(hx, hz)
 
     if concreteLayerId ~= nil then
         for px = borderMinX, borderMaxX, AREA_FILL_STEP do
@@ -320,35 +369,29 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
         log("[TestRig] CONCRETEINDUSTRIAL layer not found, skipping border")
     end
 
-    -- Declared-area dogfood case: re-placing the rig should replace its
-    -- own area, not accumulate a fresh stale rectangle on top of every
-    -- past placement. Cleared by type (WailaAreaIndex:clear()), not via a
-    -- remembered instance-field reference -- an area restored from
-    -- waila.xml on load has no such reference pointing to it yet, but
-    -- clearing by type name catches it correctly regardless.
-    local existingIndex = Waila.indices[WailaDebugTools.TEST_RIG_AREA_TYPE]
-    if existingIndex ~= nil and existingIndex.className == WailaAreaIndex.MARKER then
-        existingIndex:clear()
-    end
+    -- actionLabel/actionCallback/deleteCallback deliberately NOT set
+    -- here anymore -- they're registered once by TYPE instead (see
+    -- WailaDebugTools.new()), which also covers an area restored from
+    -- waila.xml, not just a freshly-placed one.
     Waila.registerArea({
         type = WailaDebugTools.TEST_RIG_AREA_TYPE,
         box = { minX = borderMinX, maxX = borderMaxX, minZ = borderMinZ, maxZ = borderMaxZ },
         metadata = { originX = hx, originZ = hz },
-        -- Proves declared areas can carry a real interaction, not just be
-        -- informational -- walk onto the rig, press the bound key
-        -- (WAILA_AREA_ACTION), it clears and rebuilds itself in place.
-        actionLabel = "Reset foliage test rig",
-        actionCallback = function(area)
-            self:resetFoliageTestRig(area.metadata.originX, area.metadata.originZ)
-        end,
     })
     log("[TestRig] declared area registered, origin=(%.2f %.2f)", hx, hz)
 end
 
--- Meters -- half-size of the clearing quad per grid point, comfortably
--- covering placeFoliage's own randomized write footprint (halfSize up to
--- 0.7m there) without needing to match its exact random rotation.
-local CLEAR_QUAD_HALF_SIZE = 1.0
+-- Meters -- half-size of the clearing quad per grid point. Was 1.0
+-- (exactly half of TEST_RIG_SPACING, i.e. zero overlap between
+-- neighboring grid points' clear quads) -- confirmed live that this was
+-- too tight: placeFoliage's own quad is randomly ROTATED, so its
+-- corner-to-center distance can approach halfSize*sqrt(2) (~0.99m at
+-- halfSize's own max of 0.7m), right at the edge of a 1.0m axis-aligned
+-- clear quad with no margin for rounding. 2.0m gives real overlap with
+-- every neighbor (clearing the same spot twice is a harmless no-op, see
+-- clearFoliageQuad), trading a bit of redundant work for actually
+-- reliable coverage.
+local CLEAR_QUAD_HALF_SIZE = 2.0
 
 -- Writes "grassShort" (a layer FSDensityMapUtil.clearDecoArea reliably
 -- clears) then clears it, over the same fixed quad -- confirmed pattern
@@ -368,21 +411,80 @@ function WailaDebugTools:clearFoliageQuad(x, z)
     FSDensityMapUtil.clearDecoArea(x0, z0, x1, z1, x2, z2)
 end
 
--- Clears every grid point placeFoliageTestRig wrote to, then re-places a
--- fresh rig at the same origin -- the "press [key] to reset" action
--- attached to its declared area above. Doesn't try to un-paint the
--- concrete border -- placeFoliageTestRig repaints it fresh anyway.
-function WailaDebugTools:resetFoliageTestRig(originX, originZ)
-    log("[TestRig] Resetting at origin (%.2f %.2f)", originX, originZ)
+-- Clears every grid point placeFoliageTestRig wrote to, without
+-- replanting -- split out of resetFoliageTestRig so the declared area's
+-- deleteCallback (see WailaDebugTools.new's type registration) can reuse
+-- just the clearing half. Deco foliage is an overlay, not baked into the
+-- terrain texture, so clearing it does reveal clean ground underneath --
+-- doesn't touch the concrete BORDER though, that's a terrain PAINT
+-- change, a completely separate subsystem (see clearConcreteBorder).
+--
+-- Also repaints dirt over placeFoliageTestRig's own INTERIOR concrete
+-- dabs -- confirmed live (screenshot showed a visible row of leftover
+-- dots after delete): forestGrass/forestBush cap out at
+-- TEST_RIG_GRID_MAX_STATE=1, so placement paints an individual
+-- CONCRETEINDUSTRIAL dab at every state beyond that (14 points per row,
+-- see placeFoliageTestRig's own `state > maxState` check) -- these sit
+-- well inside the grid, nowhere near the outer border the border-repaint
+-- loop walks, so neither existing cleanup path touched them. Mirrors
+-- placeFoliageTestRig's own condition exactly, just painting dirt01
+-- instead of concrete.
+function WailaDebugTools:clearFoliageTestRigGrid(originX, originZ)
+    local dirtLayerId = self:getTerrainLayerIdByName("dirt01")
 
     for row, layerName in ipairs(TEST_RIG_GRID_LAYERS) do
         local pz = originZ + (row - 1) * TEST_RIG_SPACING
+        local maxState = TEST_RIG_GRID_MAX_STATE[layerName] or TEST_RIG_GRID_STATES
+
         for state = 0, TEST_RIG_GRID_STATES do
             local px = originX + state * TEST_RIG_SPACING
             self:clearFoliageQuad(px, pz)
+
+            if state > maxState and dirtLayerId ~= nil then
+                self:paintTerrainAtLayer(px, pz, dirtLayerId)
+            end
         end
     end
+end
 
+-- There's no "un-paint" primitive, only "paint over with something
+-- else" -- repaints the exact same outline placeFoliageTestRig's own
+-- border loop painted (computeTestRigBorderBounds, same math both
+-- places), using "dirt01" (a real, confirmed layer name on this map --
+-- see GROUND_LAYER_NAMES) as a reasonable default rather than trying to
+-- remember/restore whatever layer was actually there before the rig was
+-- placed, which was never recorded anywhere.
+function WailaDebugTools:clearConcreteBorder(originX, originZ)
+    local dirtLayerId = self:getTerrainLayerIdByName("dirt01")
+    if dirtLayerId == nil then
+        log("[TestRig] dirt01 layer not found, skipping border cleanup")
+        return
+    end
+
+    local borderMinX, borderMaxX, borderMinZ, borderMaxZ = computeTestRigBorderBounds(originX, originZ)
+
+    for px = borderMinX, borderMaxX, AREA_FILL_STEP do
+        self:paintTerrainAtLayer(px, borderMinZ, dirtLayerId)
+        self:paintTerrainAtLayer(px, borderMaxZ, dirtLayerId)
+    end
+    for pz = borderMinZ, borderMaxZ, AREA_FILL_STEP do
+        self:paintTerrainAtLayer(borderMinX, pz, dirtLayerId)
+        self:paintTerrainAtLayer(borderMaxX, pz, dirtLayerId)
+    end
+    log("[TestRig] border repainted with dirt01: X[%.2f, %.2f] Z[%.2f, %.2f]", borderMinX, borderMaxX, borderMinZ, borderMaxZ)
+end
+
+-- Clears the grid, then re-places a fresh rig at the same origin -- the
+-- "press [key] to reset" action attached to its declared area above
+-- (also surfaced as a row in WailaDebugHubDialog's action list, see
+-- area.actionLabel/actionCallback).
+-- placeFoliageTestRig now clears whatever test rig area is already
+-- registered (same type, same origin here) BEFORE placing, so this is
+-- just a thin, differently-named entry point -- kept separate from a
+-- bare placeFoliageTestRig call since "Reset" is a distinct, named
+-- action in the hub/world-key UI, not because it needs different logic.
+function WailaDebugTools:resetFoliageTestRig(originX, originZ)
+    log("[TestRig] Resetting at origin (%.2f %.2f)", originX, originZ)
     self:placeFoliageTestRig(originX, originZ)
 end
 

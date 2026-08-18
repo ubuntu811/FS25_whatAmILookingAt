@@ -280,6 +280,12 @@ function WailaFieldIndex:rescanBlobAt(vehicleOrPlayer, x, z)
         resultEntry = entry
     end
 
+    -- Unconditional lifesign at the publish site itself, not just
+    -- whatever a subscriber happens to log on its own end -- any mod can
+    -- subscribe to this (Waila.events.vehicleLeftField), so "did WAILA
+    -- actually fire this" needs to be independently confirmable from
+    -- "did the subscriber handle it correctly".
+    log("[VehicleTracking] firing VEHICLE_LEFT_FIELD entry=%s", tostring(resultEntry and resultEntry.wailaFieldId))
     g_messageCenter:publish(WailaFieldIndex.VEHICLE_LEFT_FIELD, vehicleOrPlayer, resultEntry)
 end
 

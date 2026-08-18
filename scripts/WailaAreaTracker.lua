@@ -26,6 +26,10 @@ local WailaAreaTracker_mt = Class(WailaAreaTracker)
 WailaAreaTracker.AREA_ENTERED = nextMessageTypeId()
 WailaAreaTracker.AREA_LEFT = nextMessageTypeId()
 
+local function log(formatString, ...)
+    Logging.info("[WhatAmILookingAt] " .. formatString, ...)
+end
+
 function WailaAreaTracker.new()
     local self = setmetatable({}, WailaAreaTracker_mt)
     self.currentAreas = {}
@@ -50,6 +54,13 @@ function WailaAreaTracker:update(dt)
         if match ~= nil then
             newAreas[typeName] = match
             if self.currentAreas[typeName] == nil then
+                -- Unconditional lifesign at the publish site itself, not
+                -- just whatever a subscriber happens to log on its own
+                -- end -- any mod can subscribe to this (Waila.events.
+                -- areaEntered), so "did WAILA actually fire this" needs
+                -- to be independently confirmable from "did the
+                -- subscriber handle it correctly".
+                log("[AreaTracker] firing AREA_ENTERED type='%s'", tostring(typeName))
                 g_messageCenter:publish(WailaAreaTracker.AREA_ENTERED, typeName, match)
             end
         end
@@ -57,6 +68,7 @@ function WailaAreaTracker:update(dt)
 
     for typeName, area in pairs(self.currentAreas) do
         if newAreas[typeName] == nil then
+            log("[AreaTracker] firing AREA_LEFT type='%s'", tostring(typeName))
             g_messageCenter:publish(WailaAreaTracker.AREA_LEFT, typeName, area)
         end
     end

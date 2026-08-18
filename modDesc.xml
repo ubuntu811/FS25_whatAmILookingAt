@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no" ?>
 <modDesc descVersion="93">
     <author>ubuntu811</author>
-    <version>0.8.0.0</version>
+    <version>1.0.0.0</version>
     <title>
         <en>What Am I Looking At?</en>
         <de>What Am I Looking At?</de>
@@ -52,21 +52,19 @@
              should work identically on foot or in any vehicle. -->
         <action name="WAILA_TOGGLE_HUD" axisType="HALF"/>
         <action name="WAILA_DUMP_TARGET" axisType="HALF"/>
-        <action name="WAILA_DUMP_FOLIAGE_CATALOG" axisType="HALF"/>
         <!-- Opens WailaDebugHubDialog: one shared tabbed screen for
              throwaway/investigation debug tools and declared-area
              management, replacing what used to be two separate binds
              (a debug-menu OptionDialog and a standalone area list). Other
              mods can add their own tab via Waila.registerDebugTab instead
-             of taking their own keybind. See gui/WailaDebugHubDialog.xml. -->
+             of taking their own keybind. See gui/WailaDebugHubDialog.xml.
+             Also now the only way to dump the foliage catalog or run a
+             declared area's own action (Foliage tab / Declared Areas tab
+             respectively); those used to have their own dedicated
+             keybinds (WAILA_DUMP_FOLIAGE_CATALOG, WAILA_AREA_ACTION),
+             both removed as pure duplicates once the hub covered the
+             same actions with no loss of function. -->
         <action name="WAILA_DEBUG_HUB" axisType="HALF"/>
-        <!-- Generic "interact with whatever declared area I'm standing in"
-             action, not tied to any one mod's use case. Text/active
-             state are set dynamically per-area (see
-             FS25WhatAmILookingAt:onAreaEntered/onAreaLeft), starts
-             inactive/invisible since most declared areas have no action
-             at all. -->
-        <action name="WAILA_AREA_ACTION" axisType="HALF"/>
     </actions>
 
     <inputBinding>
@@ -76,14 +74,8 @@
         <actionBinding action="WAILA_DUMP_TARGET">
             <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_j" index="1" />
         </actionBinding>
-        <actionBinding action="WAILA_DUMP_FOLIAGE_CATALOG">
-            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_k" index="1" />
-        </actionBinding>
         <actionBinding action="WAILA_DEBUG_HUB">
             <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_l" index="1" />
-        </actionBinding>
-        <actionBinding action="WAILA_AREA_ACTION">
-            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_r" index="1" />
         </actionBinding>
     </inputBinding>
 
@@ -96,17 +88,9 @@
             <en>Dump inspected target</en>
             <de>Untersuchtes Ziel ausgeben</de>
         </text>
-        <text name="input_WAILA_DUMP_FOLIAGE_CATALOG">
-            <en>Dump foliage catalog for this map</en>
-            <de>Bewuchskatalog dieser Karte ausgeben</de>
-        </text>
         <text name="input_WAILA_DEBUG_HUB">
-            <en>Debug tools / declared areas</en>
-            <de>Debug-Werkzeuge / deklarierte Bereiche</de>
-        </text>
-        <text name="input_WAILA_AREA_ACTION">
-            <en>Interact with declared area</en>
-            <de>Mit deklariertem Bereich interagieren</de>
+            <en>Open WAILA debug hub</en>
+            <de>WAILA-Debug-Hub öffnen</de>
         </text>
     </l10n>
 </modDesc>

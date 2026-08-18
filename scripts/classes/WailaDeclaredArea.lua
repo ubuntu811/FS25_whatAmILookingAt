@@ -39,6 +39,12 @@ function WailaDeclaredArea.new(data)
     -- press -- both nil for an area that's just informational.
     self.actionLabel = data.actionLabel
     self.actionCallback = data.actionCallback
+    -- Optional: runs when this area is deleted via the debug hub's
+    -- Declared Areas tab (see FS25WhatAmILookingAt.lua's "areas" tab
+    -- registration), BEFORE Waila.unregisterArea -- lets a mod clean up
+    -- whatever it actually placed in the world (foliage, in the test
+    -- rig's case). nil for an area with nothing to clean up.
+    self.deleteCallback = data.deleteCallback
     return self
 end
 

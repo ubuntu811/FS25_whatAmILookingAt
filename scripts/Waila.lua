@@ -102,26 +102,33 @@ function Waila.unregisterArea(area)
     end
 end
 
--- Public: unregisters every declared area (any type, WAILA's own "field"
--- excluded -- that's not a declared area and isn't something a debug
--- action should be able to delete) covering (x, z). Returns a list of the
--- type names actually removed, empty if none matched. The only way to get
--- rid of a stale declared area otherwise was hand-editing waila.xml (a
--- deleted area just won't be there next time saveToXML runs, since that
--- always writes a fresh snapshot of whatever's currently registered) --
--- this is the in-game equivalent, not tied to any one mod's area type.
-function Waila.deleteAreasAt(x, z)
-    local removedTypes = {}
-    for typeName, index in pairs(Waila.indices) do
-        if index.className == WailaAreaIndex.MARKER then
-            local area = index:get(x, z)
-            if area ~= nil then
-                index:remove(area)
-                table.insert(removedTypes, typeName)
-            end
-        end
+-- Registered ONCE per area TYPE (not per instance) -- an area restored
+-- from waila.xml never carries function-valued fields (actionCallback/
+-- deleteCallback/etc.), since functions have no XML representation, but
+-- its area.type string survives the round-trip fine. Looking callbacks
+-- up by type instead of expecting them to live on the instance means a
+-- restored area resolves correctly too, not just a freshly-placed one --
+-- confirmed live: deleting a waila.xml-restored foliage test rig removed
+-- WAILA's own tracking but left the actual placed foliage in the world,
+-- because the per-instance deleteCallback it would have needed was
+-- never there to begin with on a restored instance.
+Waila.areaTypeCallbacks = {}
+
+function Waila.registerAreaType(typeName, callbacks)
+    Waila.areaTypeCallbacks[typeName] = callbacks
+end
+
+-- Prefers the area instance's own field (simplest for a mod whose areas
+-- are never persisted/restored) but falls back to the type-level
+-- registration above when the instance doesn't have one -- covers both
+-- a freshly-placed area and one restored from waila.xml with the same
+-- lookup.
+function Waila.resolveAreaField(area, fieldName)
+    if area[fieldName] ~= nil then
+        return area[fieldName]
     end
-    return removedTypes
+    local typeCallbacks = Waila.areaTypeCallbacks[area.type]
+    return typeCallbacks ~= nil and typeCallbacks[fieldName] or nil
 end
 
 -- Every registered type name whose index reports something at (x, z) --
@@ -246,6 +253,13 @@ end
 -- runs setup for every registrant (registration order). Each step is
 -- individually pcall'd -- one module's teardown/source/setup failing
 -- doesn't stop the others from still getting reloaded.
+--
+-- Every step logs unconditionally, success included, not just failure --
+-- a registrant that silently no-ops (e.g. teardown/setup is nil, or a
+-- typo'd sourceFiles path that never matches anything) used to look
+-- identical to one that worked. "Did this actually run" needs to be
+-- answerable from the log without having to already suspect something's
+-- wrong.
 function Waila.reloadAll()
     log("[Reload] Starting (%d registered module(s))...", #Waila.reloadables)
 
@@ -253,17 +267,25 @@ function Waila.reloadAll()
         local reloadable = Waila.reloadables[i]
         if reloadable.teardown ~= nil then
             local ok, err = pcall(reloadable.teardown)
-            if not ok then
+            if ok then
+                log("[Reload] '%s' teardown OK", tostring(reloadable.id))
+            else
                 log("[Reload] '%s' teardown failed: %s", tostring(reloadable.id), tostring(err))
             end
+        else
+            log("[Reload] '%s' has no teardown, skipping", tostring(reloadable.id))
         end
     end
 
     for _, reloadable in ipairs(Waila.reloadables) do
+        local fileCount = reloadable.sourceFiles ~= nil and #reloadable.sourceFiles or 0
+        log("[Reload] '%s': sourcing %d file(s)", tostring(reloadable.id), fileCount)
         for _, relativePath in ipairs(reloadable.sourceFiles or {}) do
             local path = Utils.getFilename(relativePath, reloadable.modDirectory)
             local ok, err = pcall(source, path)
-            if not ok then
+            if ok then
+                log("[Reload] '%s': sourced %s OK", tostring(reloadable.id), relativePath)
+            else
                 log("[Reload] '%s': failed sourcing %s: %s", tostring(reloadable.id), relativePath, tostring(err))
             end
         end
@@ -272,9 +294,13 @@ function Waila.reloadAll()
     for _, reloadable in ipairs(Waila.reloadables) do
         if reloadable.setup ~= nil then
             local ok, err = pcall(reloadable.setup)
-            if not ok then
+            if ok then
+                log("[Reload] '%s' setup OK", tostring(reloadable.id))
+            else
                 log("[Reload] '%s' setup failed: %s", tostring(reloadable.id), tostring(err))
             end
+        else
+            log("[Reload] '%s' has no setup, skipping", tostring(reloadable.id))
         end
     end
 
