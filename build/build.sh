@@ -36,7 +36,7 @@ echo "--> Copying production files to staging area..."
 # unconditional `cp -r l10n/` only ever worked locally, where the empty dir
 # still physically exists on disk from before this was noticed - it fails
 # on any real fresh checkout, which is exactly what caught it (first CI run).
-for i in icon.dds scripts/ l10n/ modDesc.xml; do
+for i in icon.dds scripts/ gui/ l10n/ modDesc.xml; do
   if [ -e "$i" ]; then
     cp -r "$i" "$BUILD_DIR/$i"
   else

@@ -17,14 +17,30 @@
     <extraSourceFiles>
         <sourceFile filename="scripts/WailaUtil.lua" />
         <sourceFile filename="scripts/WailaRaycaster.lua" />
+        <sourceFile filename="scripts/WailaJobDefinitions.lua" />
+        <sourceFile filename="scripts/classes/WailaField.lua" />
+        <sourceFile filename="scripts/classes/WailaTerrain.lua" />
+        <sourceFile filename="scripts/classes/WailaTerrainArea.lua" />
+        <sourceFile filename="scripts/classes/WailaObject.lua" />
+        <sourceFile filename="scripts/classes/WailaVehicle.lua" />
+        <sourceFile filename="scripts/classes/WailaFoliageHit.lua" />
+        <sourceFile filename="scripts/classes/WailaFoliageArea.lua" />
+        <sourceFile filename="scripts/classes/WailaDeclaredArea.lua" />
         <sourceFile filename="scripts/inspectors/WailaTerrainInspector.lua" />
         <sourceFile filename="scripts/inspectors/WailaFoliageInspector.lua" />
         <sourceFile filename="scripts/inspectors/WailaObjectInspector.lua" />
         <sourceFile filename="scripts/inspectors/WailaVehicleInspector.lua" />
         <sourceFile filename="scripts/inspectors/WailaFieldInspector.lua" />
+        <sourceFile filename="scripts/WailaFieldGridScanner.lua" />
+        <sourceFile filename="scripts/WailaFieldBoundaryTracer.lua" />
+        <sourceFile filename="scripts/WailaFieldIndex.lua" />
+        <sourceFile filename="scripts/WailaAreaIndex.lua" />
+        <sourceFile filename="scripts/WailaAreaTracker.lua" />
+        <sourceFile filename="scripts/Waila.lua" />
         <sourceFile filename="scripts/WailaDebugDump.lua" />
         <sourceFile filename="scripts/WailaDebugTools.lua" />
         <sourceFile filename="scripts/WailaHud.lua" />
+        <sourceFile filename="scripts/WailaDebugHubDialog.lua" />
         <sourceFile filename="scripts/FS25WhatAmILookingAt.lua" />
     </extraSourceFiles>
 
@@ -37,10 +53,20 @@
         <action name="WAILA_TOGGLE_HUD" axisType="HALF"/>
         <action name="WAILA_DUMP_TARGET" axisType="HALF"/>
         <action name="WAILA_DUMP_FOLIAGE_CATALOG" axisType="HALF"/>
-        <!-- Menu for throwaway/investigation debug tools, same pattern as
-             IW's own IW_DEBUG_MENU - keeps future one-off world-inspection
-             probes from needing their own keybind each time. -->
-        <action name="WAILA_DEBUG_MENU" axisType="HALF"/>
+        <!-- Opens WailaDebugHubDialog: one shared tabbed screen for
+             throwaway/investigation debug tools and declared-area
+             management, replacing what used to be two separate binds
+             (a debug-menu OptionDialog and a standalone area list). Other
+             mods can add their own tab via Waila.registerDebugTab instead
+             of taking their own keybind. See gui/WailaDebugHubDialog.xml. -->
+        <action name="WAILA_DEBUG_HUB" axisType="HALF"/>
+        <!-- Generic "interact with whatever declared area I'm standing in"
+             action, not tied to any one mod's use case. Text/active
+             state are set dynamically per-area (see
+             FS25WhatAmILookingAt:onAreaEntered/onAreaLeft), starts
+             inactive/invisible since most declared areas have no action
+             at all. -->
+        <action name="WAILA_AREA_ACTION" axisType="HALF"/>
     </actions>
 
     <inputBinding>
@@ -53,8 +79,11 @@
         <actionBinding action="WAILA_DUMP_FOLIAGE_CATALOG">
             <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_k" index="1" />
         </actionBinding>
-        <actionBinding action="WAILA_DEBUG_MENU">
+        <actionBinding action="WAILA_DEBUG_HUB">
             <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_l" index="1" />
+        </actionBinding>
+        <actionBinding action="WAILA_AREA_ACTION">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_r" index="1" />
         </actionBinding>
     </inputBinding>
 
@@ -71,9 +100,13 @@
             <en>Dump foliage catalog for this map</en>
             <de>Bewuchskatalog dieser Karte ausgeben</de>
         </text>
-        <text name="input_WAILA_DEBUG_MENU">
-            <en>Debug tools menu</en>
-            <de>Debug-Werkzeuge Menü</de>
+        <text name="input_WAILA_DEBUG_HUB">
+            <en>Debug tools / declared areas</en>
+            <de>Debug-Werkzeuge / deklarierte Bereiche</de>
+        </text>
+        <text name="input_WAILA_AREA_ACTION">
+            <en>Interact with declared area</en>
+            <de>Mit deklariertem Bereich interagieren</de>
         </text>
     </l10n>
 </modDesc>

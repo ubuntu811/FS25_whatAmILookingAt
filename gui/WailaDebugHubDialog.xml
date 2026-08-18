@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<GUI onOpen="onOpen" onClose="onClose">
+    <Bitmap profile="fs25_fullScreenBackground"/>
+
+    <!-- Left column: topics (registered debug tabs), same base-game
+         "hotspot filter" shape as the in-game map's own Hotspots menu
+         (VEHICLES/COMBINES/TRAILERS/... list on the left, content on the
+         right); unmodified fs25_subCategoryContainer defaults, exactly
+         what already rendered correctly, just re-pointed at topics
+         instead of items. Scales to any number of registered tabs via
+         its own scrollbar; no fixed slot count, no button-row crowding. -->
+    <GuiElement profile="fs25_subCategoryContainer" height="950px">
+        <Bitmap profile="fs25_subCategoryStartClipper" name="topicStartClipper"/>
+        <Bitmap profile="fs25_subCategoryStopClipper" name="topicEndClipper"/>
+        <SmoothList profile="fs25_subCategoryList" id="topicList" startClipperElementName="topicStartClipper" endClipperElementName="topicEndClipper">
+            <ListItem profile="fs25_subCategoryListItem">
+                <Bitmap profile="waila_hubTopicIcon" name="icon"/>
+                <Text profile="waila_hubTopicLabel" name="label"/>
+            </ListItem>
+        </SmoothList>
+        <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
+            <Slider profile="fs25_listSlider" dataElementId="topicList"/>
+        </ThreePartBitmap>
+    </GuiElement>
+
+    <!-- Right column: the selected topic's items; position/size lifted
+         directly from FS25_MapObjectsHider's own right-hand panel
+         (fs25_mohMapBox/fs25_mohCamBox in its mapObjectsHiderDialog.xml, a
+         real installed mod, not guessed), same emptyPanel +
+         anchorStretchingYLeft technique, same 450px x-offset (matches
+         where the topic list column ends). Same list/clipper/slider
+         pieces as the topic list, just nested in this panel instead;
+         wider than the old single narrow column, so labels like "Dump
+         inspected target" have more room before truncating. -->
+    <GuiElement profile="waila_hubDetailBox">
+        <Bitmap profile="fs25_subCategoryStartClipper" name="itemStartClipper"/>
+        <Bitmap profile="fs25_subCategoryStopClipper" name="itemEndClipper"/>
+        <SmoothList profile="fs25_subCategoryList" id="itemList" startClipperElementName="itemStartClipper" endClipperElementName="itemEndClipper">
+            <!-- Flat background (waila_hubFlatListItem), not
+                 fs25_subCategoryListItem: that profile's dark icon-box
+                 cap is baked into the gui.animalDealer_box atlas image
+                 itself, not adjustable via a size/position override, and
+                 with no icon here (unlike the topic list) it just reads as
+                 a big empty black block in this wider column. -->
+            <ListItem profile="waila_hubFlatListItem">
+                <Text profile="waila_hubItemPrimary" name="primary"/>
+                <Text profile="waila_hubItemSecondary" name="secondary"/>
+            </ListItem>
+        </SmoothList>
+        <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
+            <Slider profile="fs25_listSlider" dataElementId="itemList"/>
+        </ThreePartBitmap>
+    </GuiElement>
+
+    <!-- Third column: the selected item's actions (tab.buttons), as
+         selectable rows instead of a fixed-count footer button row;
+         same reasoning as ditching the fixed tab-button row for the
+         topic list: no cap on how many actions a tab can offer, and one
+         consistent "select a row" interaction across all three columns
+         (select a topic -> select an item -> select an action, which
+         runs immediately). Anchored from the RIGHT edge instead of an
+         offset from the left, same dual-panel technique
+         FS25_MapObjectsHider uses for its own two side-by-side preview
+         boxes (one anchorStretchingYLeft, one anchorStretchingYRight),
+         not a new pattern. -->
+    <GuiElement profile="waila_hubActionsBox">
+        <Bitmap profile="fs25_subCategoryStartClipper" name="actionStartClipper"/>
+        <Bitmap profile="fs25_subCategoryStopClipper" name="actionEndClipper"/>
+        <SmoothList profile="fs25_subCategoryList" id="actionList" startClipperElementName="actionStartClipper" endClipperElementName="actionEndClipper">
+            <ListItem profile="waila_hubFlatListItem">
+                <Text profile="waila_hubActionLabel" name="label"/>
+            </ListItem>
+        </SmoothList>
+        <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
+            <Slider profile="fs25_listSlider" dataElementId="actionList"/>
+        </ThreePartBitmap>
+    </GuiElement>
+
+    <BoxLayout profile="fs25_buttonBox" id="buttonsPanel">
+        <Button profile="buttonBack" onClick="onClickClose" text="$l10n_button_back"/>
+    </BoxLayout>
+
+    <GUIProfiles>
+        <!-- fs25_subCategoryListItemIcon is the real base-game icon-slot
+             profile for this exact row skin (guiProfiles.xml); default
+             size/position (anchorMiddleLeft, 66x65, 11px 8px) already
+             fits the dark icon-slot area of the shared list-item
+             background, no override needed. imageFilename set per-row
+             in Lua via BitmapElement:setImageFilename. -->
+        <Profile name="waila_hubTopicIcon" extends="fs25_subCategoryListItemIcon"/>
+        <Profile name="waila_hubTopicLabel" extends="fs25_textDarkHighlight" with="anchorBottomLeft">
+            <position value="100px 60px"/>
+            <textSize value="26px"/>
+            <textVerticalAlignment value="bottom"/>
+            <textColor value="$preset_fs25_colorMainHighlight"/>
+            <textFocusedColor value="$preset_fs25_colorMainLight"/>
+            <textHighlightedColor value="$preset_fs25_colorMainHighlight"/>
+        </Profile>
+        <!-- Plain flat fill, not the shop-style gui.animalDealer_box skin;
+             gui.colorPreset is a genuinely uniform-color slice (used
+             all over guiProfiles.xml for buttons/separators/plain boxes).
+             Selected fill uses the same bright green as everywhere else
+             selection shows in this dialog (fs25_colorMainHighlight,
+             matching the topic list's still-default gui.animalDealer_box
+             skin) rather than colorItemBgSelected (dark); the text
+             profiles here extend fs25_textDarkHighlight, which already
+             defines a DARK textSelectedColor by design, meant to pair
+             with a bright selected background; a dark selected fill was
+             dark-text-on-dark-background. -->
+        <Profile name="waila_hubFlatListItem" extends="baseReference" with="anchorTopStretchingX">
+            <height value="140px"/>
+            <imageSliceId value="gui.colorPreset"/>
+            <imageColor value="$preset_colorItemBgNormal"/>
+            <imageSelectedSliceId value="gui.colorPreset"/>
+            <imageSelectedColor value="$preset_fs25_colorMainHighlight"/>
+        </Profile>
+        <!-- textMaxNumLines="2" + a percentage size was reverted here;
+             reproduced a real stack overflow inside the engine's own
+             TextElement update/height code on a clean load, not just on
+             reload. Back to single-line truncation (no size/
+             textMaxNumLines override) until a safer way to get wrapping
+             is confirmed; a crash is worse than a truncated label. -->
+        <Profile name="waila_hubItemPrimary" extends="fs25_textDarkHighlight" with="anchorBottomLeft">
+            <position value="30px 60px"/>
+            <textSize value="26px"/>
+            <textVerticalAlignment value="bottom"/>
+            <textColor value="$preset_fs25_colorMainHighlight"/>
+            <textFocusedColor value="$preset_fs25_colorMainLight"/>
+            <textHighlightedColor value="$preset_fs25_colorMainHighlight"/>
+        </Profile>
+        <Profile name="waila_hubItemSecondary" extends="fs25_textDarkHighlight" with="anchorBottomRight">
+            <position value="-38px 30px"/>
+            <textAlignment value="right"/>
+        </Profile>
+        <Profile name="waila_hubDetailBox" extends="emptyPanel" with="anchorStretchingYLeft">
+            <size value="45% 950px"/>
+            <position value="450px 0px"/>
+        </Profile>
+        <Profile name="waila_hubActionsBox" extends="emptyPanel" with="anchorStretchingYRight">
+            <size value="20% 950px"/>
+            <position value="-30px 0px"/>
+        </Profile>
+        <Profile name="waila_hubActionLabel" extends="fs25_textDarkHighlight" with="anchorBottomLeft">
+            <position value="30px 60px"/>
+            <textSize value="26px"/>
+            <textVerticalAlignment value="bottom"/>
+            <textColor value="$preset_fs25_colorMainHighlight"/>
+            <textFocusedColor value="$preset_fs25_colorMainLight"/>
+            <textHighlightedColor value="$preset_fs25_colorMainHighlight"/>
+        </Profile>
+    </GUIProfiles>
+</GUI>

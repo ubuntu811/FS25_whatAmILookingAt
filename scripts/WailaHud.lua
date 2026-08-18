@@ -10,6 +10,11 @@ function WailaHud.new()
     self.paddingY = 0.010
     self.lineHeight = 0.018
     self.textSize = 0.014
+    -- Extra vertical space inserted before a section's first line (see
+    -- addLine's gapBefore param) -- was one flat, ungapped block before,
+    -- with no visual separation between e.g. WEATHER, Target/Vehicle, and
+    -- the AREA stats block.
+    self.sectionGap = 0.008
     self.maxStatsRows = 6
     self.maxFoliageStatsRows = 10
 
@@ -30,8 +35,8 @@ function WailaHud.new()
     return self
 end
 
-function WailaHud:addLine(lines, text, bold)
-    table.insert(lines, {text = text, bold = bold == true})
+function WailaHud:addLine(lines, text, bold, gapBefore)
+    table.insert(lines, {text = text, bold = bold == true, gapBefore = gapBefore == true})
 end
 
 -- Reads the REAL current binding for an action instead of a hardcoded
@@ -209,7 +214,14 @@ function WailaHud:drawLines(lines)
     end
 
     local x = boxLeft + self.paddingX
-    local panelHeight = #lines * self.lineHeight + self.paddingY * 2
+
+    -- Cumulative, not #lines * lineHeight -- a gapBefore line costs extra
+    -- height that a flat multiply can't account for.
+    local contentHeight = 0
+    for _, entry in ipairs(lines) do
+        contentHeight = contentHeight + self.lineHeight + (entry.gapBefore and self.sectionGap or 0)
+    end
+    local panelHeight = contentHeight + self.paddingY * 2
     local panelBottom = top - panelHeight + self.paddingY
 
     if drawFilledRect ~= nil then
@@ -225,9 +237,11 @@ function WailaHud:drawLines(lines)
     setTextAlignment(RenderText.ALIGN_LEFT)
     setTextColor(1, 1, 1, 1)
 
-    for index, entry in ipairs(lines) do
+    local y = top
+    for _, entry in ipairs(lines) do
+        y = y - self.lineHeight - (entry.gapBefore and self.sectionGap or 0)
         setTextBold(entry.bold)
-        renderText(x, top - index * self.lineHeight, self.textSize, entry.text)
+        renderText(x, y, self.textSize, entry.text)
     end
 
     setTextBold(false)
@@ -246,12 +260,25 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     -- directly, so it's worth showing the inputs, not just the verdict.
     if inspection ~= nil and inspection.weather ~= nil then
         local weather = inspection.weather
-        self:addLine(lines, "WEATHER", true)
+        self:addLine(lines, "Weather", true, true)
         self:addLine(lines, string.format(
             "rainScale=%.2f  timeSinceLastRain=%.1fs  temp=%.1f\194\176C",
             weather.rainScale, weather.timeSinceLastRain, weather.temperature
         ))
         self:addLine(lines, string.format("isRaining=%s (rainScale>0.1 and timeSinceLastRain<30 and temp>0)", WailaUtil.bool(weather.isRaining)))
+    end
+
+    -- Global state, same reasoning as Weather above -- only shown while a
+    -- sweep is actually running (isSweeping), not a permanent fixture.
+    -- Reads Waila.indices.field directly (same-mod access, no
+    -- g_currentMission indirection needed -- that's only required for
+    -- OTHER mods reading this) rather than threading sweep state through
+    -- draw()'s own parameters.
+    do
+        local fieldIndex = Waila.indices.field
+        if fieldIndex ~= nil and fieldIndex.isSweeping and fieldIndex.scanner ~= nil then
+            self:addLine(lines, string.format("Field sweep: row %d/%d", (fieldIndex.scanner.lastLoggedRow or 0) + 1, fieldIndex.scanner.rows), true, true)
+        end
     end
 
     if inspection == nil or inspection.hit == nil then
@@ -280,9 +307,26 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         targetKind = string.format("foliage (%s(%s)[%s])", foliagePoint[1].name, tostring(foliagePoint[1].density), foliagePoint[1].kind or "unknown")
     end
 
-    self:addLine(lines, string.format("Target: %s", targetKind), true)
+    self:addLine(lines, string.format("Target: %s", targetKind), true, true)
     self:addLine(lines, string.format("Hit position: %.2f / %.2f / %.2f", hit.x, hit.y, hit.z))
     self:addLine(lines, string.format("Node: %s  name=%s", tostring(hit.nodeId), WailaUtil.value(object and object.nodeName)))
+
+    -- Any mod-declared area covering this exact hit point (see
+    -- Waila.registerArea/WailaDeclaredArea) -- "field" excluded, that
+    -- already gets its own dedicated section below. Waila.getTypes loops
+    -- every registered index generically, so a third-party mod's area
+    -- shows up here with zero WailaHud changes on its end.
+    do
+        local declaredTypes = {}
+        for _, typeName in ipairs(Waila.getTypes(hit.x, hit.z)) do
+            if typeName ~= "field" then
+                table.insert(declaredTypes, typeName)
+            end
+        end
+        if #declaredTypes > 0 then
+            self:addLine(lines, "Declared areas: " .. table.concat(declaredTypes, ", "), true, true)
+        end
+    end
 
     if object ~= nil and object.nodePosition ~= nil then
         self:addLine(lines, "Node position: " .. self:formatPosition(object.nodePosition))
@@ -295,7 +339,7 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     end
 
     if vehicle ~= nil then
-        self:addLine(lines, string.format("Vehicle: %s", WailaUtil.value(vehicle.vehicleName)), true)
+        self:addLine(lines, string.format("Vehicle: %s", WailaUtil.value(vehicle.vehicleName)), true, true)
         self:addLine(lines, string.format("Root: %s  name=%s  class=%s", WailaUtil.value(vehicle.rootNodeId), WailaUtil.value(vehicle.rootNodeName), WailaUtil.value(vehicle.vehicleClass)))
 
         if vehicle.componentIndex ~= nil then
@@ -370,7 +414,7 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     if vehicle == nil then
         local terrain = inspection.terrain
         if terrain ~= nil then
-            self:addLine(lines, string.format("Ground: %s [%s]  field=%s", terrain.materialName, tostring(terrain.materialId), WailaUtil.bool(terrain.isOnField)), true)
+            self:addLine(lines, string.format("Ground: %s [%s]  field=%s", terrain.materialName, tostring(terrain.materialId), WailaUtil.bool(terrain.isOnField)), true, true)
             self:addLine(lines, string.format("Ground type=%s densityBits=%s depth=%s", WailaUtil.value(terrain.groundType), WailaUtil.value(terrain.densityBits), WailaUtil.value(terrain.depth)))
         end
 
@@ -392,17 +436,40 @@ function WailaHud:draw(inspection, areaSize, areaStep)
             -- rather than showing area=0.00ha, which would read as "zero
             -- area" instead of "not tracked as a Field at all".
             if field.fieldId ~= nil then
-                self:addLine(lines, string.format("FIELD %s  area=%.2fha  owner=%s", WailaUtil.value(field.fieldId), field.areaHa or 0, WailaUtil.value(field.ownerFarmId)), true)
+                self:addLine(lines, string.format("Field %s  area=%.2fha  owner=%s", WailaUtil.value(field.fieldId), field.areaHa or 0, WailaUtil.value(field.ownerFarmId)), true, true)
             else
-                self:addLine(lines, "FIELD (unregistered -- tilled ground, no map-defined Field object)", true)
+                self:addLine(lines, "Field (unregistered -- tilled ground, no map-defined Field object)", true, true)
             end
+            -- Shown separately from fieldId -- a farmland's own land
+            -- parcel is typically much larger than any Field registered
+            -- within it (can include forest/wilderness), so this can be
+            -- non-nil even standing well outside any actual crop area.
+            self:addLine(lines, string.format("Farmland: %s", WailaUtil.value(field.farmlandId)))
+
+            -- Which WailaFieldIndex blob/wailaFieldId this exact position
+            -- falls in, distinct from the live field data printed above --
+            -- a tillage-extended field's blob can have its own sample
+            -- point land on unregistered ground (fieldId nil above) while
+            -- still legitimately being the SAME blob that also covers real
+            -- registered Field ground elsewhere. Comparing this number
+            -- while walking across what looks like one field is how you'd
+            -- notice it actually split into several registry entries.
+            if Waila.indices.field ~= nil then
+                local entry = Waila.indices.field:getEntry(hit.x, hit.z)
+                if entry ~= nil then
+                    self:addLine(lines, string.format("WAILA field id: %d", entry.wailaFieldId))
+                else
+                    self:addLine(lines, "WAILA field id: none (nothing registered nearby)")
+                end
+            end
+
             self:addLine(lines, string.format("Crop: %s  growth=%s(%s)", WailaUtil.value(field.fruitTypeName), WailaUtil.value(field.growthStateName), WailaUtil.value(field.growthState)))
             self:addLine(lines, string.format("Ground: %s  plow=%s/%s  roller=%s  stubble=%s", WailaUtil.value(field.groundTypeName), WailaUtil.value(field.plowLevel), WailaUtil.value(field.maxPlowLevel), WailaUtil.value(field.rollerLevel), WailaUtil.value(field.stubbleShredLevel)))
             self:addLine(lines, string.format("Weed: state=%s weededState=%s  stone=%s  grassOnly=%s", WailaUtil.value(field.weedState), WailaUtil.value(field.weededState), WailaUtil.value(field.stoneLevel), WailaUtil.bool(field.grassMissionOnly)))
             self:addLine(lines, string.format("Spray: %s  level=%s/%s  lime=%s/%s", WailaUtil.value(field.sprayTypeName), WailaUtil.value(field.sprayLevel), WailaUtil.value(field.maxSprayLevel), WailaUtil.value(field.limeLevel), WailaUtil.value(field.maxLimeLevel)))
         end
 
-        self:addLine(lines, string.format("AREA %.0fx%.0fm / step %.2fm", areaSize, areaSize, areaStep), true)
+        self:addLine(lines, string.format("Area %.0fx%.0fm / step %.2fm", areaSize, areaSize, areaStep), true, true)
 
         if inspection.terrainArea ~= nil then
             self:addLine(lines, string.format("Field coverage: %.1f%%", inspection.terrainArea.fieldPercent))
@@ -420,7 +487,7 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         end
     end
 
-    self:addLine(lines, self:getActionKeyLabel("WAILA_DUMP_TARGET", "[Shift+J]") .. ": dump current target")
+    self:addLine(lines, self:getActionKeyLabel("WAILA_DUMP_TARGET", "[Shift+J]") .. ": dump current target", false, true)
     self:addLine(lines, self:getActionKeyLabel("WAILA_DEBUG_MENU", "[Shift+L]") .. ": debug tools menu")
     self:drawLines(lines)
 end

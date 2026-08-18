@@ -81,6 +81,17 @@ function WailaDebugDump.dump(inspection)
         end
     end
 
+    -- WailaField (scripts/classes/WailaField.lua) is a typed result class,
+    -- not a plain table like the others here - dumpLogJson() is its
+    -- external contract, a plain serializable snapshot, rather than
+    -- reaching into its instance fields directly the way this whole
+    -- function does for everything else.
+    if inspection.field ~= nil then
+        for key, value in pairs(inspection.field:dumpLogJson()) do
+            log("field.%s = %s (%s)", tostring(key), tostring(value), type(value))
+        end
+    end
+
     if inspection.terrain ~= nil then
         for key, value in pairs(inspection.terrain) do
             log("terrain.%s = %s (%s)", tostring(key), tostring(value), type(value))

@@ -5,24 +5,6 @@ function WailaVehicleInspector.new()
     return setmetatable({}, WailaVehicleInspector_mt)
 end
 
-local function getObjectName(object)
-    if object == nil then
-        return nil
-    end
-
-    for _, methodName in ipairs({"getFullName", "getName"}) do
-        local method = object[methodName]
-        if method ~= nil then
-            local value = WailaUtil.safeCall(nil, method, object)
-            if value ~= nil and value ~= "" then
-                return tostring(value)
-            end
-        end
-    end
-
-    return object.configFileName or object.className
-end
-
 -- Was always calling object:getRootVehicle() first, which for an
 -- attached implement returns the *towing tractor* - the root of the
 -- whole combo chain in GIANTS' vehicle-train model, not the specific
@@ -243,11 +225,11 @@ function WailaVehicleInspector:inspect(hit, objectInspection)
         end
     end
 
-    return {
+    return WailaVehicle.new({
         hitNodeId = hitNodeId,
         hitNodeName = WailaUtil.safeGlobalCall("getName", nil, hitNodeId),
         vehicle = vehicle,
-        vehicleName = getObjectName(vehicle),
+        vehicleName = WailaUtil.getObjectName(vehicle),
         vehicleClass = WailaUtil.className(vehicle),
         configFileName = vehicle.configFileName,
         rootNodeId = vehicle.rootNode,
@@ -283,5 +265,5 @@ function WailaVehicleInspector:inspect(hit, objectInspection)
         isWorking = isWorking,
         hasPushHandTool = hasPushHandTool,
         workAreaTypes = workAreaTypes
-    }
+    })
 end

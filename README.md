@@ -4,6 +4,23 @@ Developer HUD / world inspector for Farming Simulator 25. Point at
 anything - terrain, foliage, a vehicle, a tree, a physics object - and
 see what the engine actually thinks it is.
 
+Gradually becoming a base library other mods can depend on, not just a
+standalone dev HUD. FS25 represents "what is this field" about 25
+different, mutually inconsistent ways (a registered `Field` object, a
+`Farmland` ownership polygon, raw density-map ground truth, a
+`FieldState` reader that doesn't need either of the first two, tillage
+that creates real farmable ground with no `Field` behind it at all, a
+rice-paddy placeable that can span multiple unrelated `Field`s as one
+visual/functional unit, ...) - this mod already had to work all of that
+out just to answer "what am I looking at" honestly. Rather than every
+consuming mod re-deriving that same knowledge independently
+(`SmartMinimapAuto` did, before this), WAILA exposes it once, cleanly:
+typed classes (`WailaField`, ...) with a stable `dumpHudJson`/
+`dumpLogJson` contract, a background world index (`WailaFieldIndex`)
+queryable via `Waila.get(type, x, z)` / `Waila.getAll(type)`, and
+`g_messageCenter` events (`WailaFieldIndex.VEHICLE_LEFT_FIELD`) other
+mods can subscribe to instead of running their own duplicate scan.
+
 Pairs with [FS25_ImmersiveWeathering](https://github.com/ubuntu811/FS25_ImmersiveWeathering)
 (soft dependency, not required - see below).
 

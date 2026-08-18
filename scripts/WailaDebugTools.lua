@@ -41,6 +41,7 @@ local TEST_RIG_GRID_MAX_STATE = {
 }
 local TEST_RIG_GRID_STATES = 15
 local TEST_RIG_SPACING = 2.0
+WailaDebugTools.TEST_RIG_AREA_TYPE = "waila_foliage_testrig"
 local AREA_FILL_STEP = 0.5
 
 local PAINT_LAYER_TEST_ROW = {
@@ -318,6 +319,71 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
     else
         log("[TestRig] CONCRETEINDUSTRIAL layer not found, skipping border")
     end
+
+    -- Declared-area dogfood case: re-placing the rig should replace its
+    -- own area, not accumulate a fresh stale rectangle on top of every
+    -- past placement. Cleared by type (WailaAreaIndex:clear()), not via a
+    -- remembered instance-field reference -- an area restored from
+    -- waila.xml on load has no such reference pointing to it yet, but
+    -- clearing by type name catches it correctly regardless.
+    local existingIndex = Waila.indices[WailaDebugTools.TEST_RIG_AREA_TYPE]
+    if existingIndex ~= nil and existingIndex.className == WailaAreaIndex.MARKER then
+        existingIndex:clear()
+    end
+    Waila.registerArea({
+        type = WailaDebugTools.TEST_RIG_AREA_TYPE,
+        box = { minX = borderMinX, maxX = borderMaxX, minZ = borderMinZ, maxZ = borderMaxZ },
+        metadata = { originX = hx, originZ = hz },
+        -- Proves declared areas can carry a real interaction, not just be
+        -- informational -- walk onto the rig, press the bound key
+        -- (WAILA_AREA_ACTION), it clears and rebuilds itself in place.
+        actionLabel = "Reset foliage test rig",
+        actionCallback = function(area)
+            self:resetFoliageTestRig(area.metadata.originX, area.metadata.originZ)
+        end,
+    })
+    log("[TestRig] declared area registered, origin=(%.2f %.2f)", hx, hz)
+end
+
+-- Meters -- half-size of the clearing quad per grid point, comfortably
+-- covering placeFoliage's own randomized write footprint (halfSize up to
+-- 0.7m there) without needing to match its exact random rotation.
+local CLEAR_QUAD_HALF_SIZE = 1.0
+
+-- Writes "grassShort" (a layer FSDensityMapUtil.clearDecoArea reliably
+-- clears) then clears it, over the same fixed quad -- confirmed pattern
+-- from ImmersiveWeathering's own tyre-effect code: clearDecoArea alone
+-- doesn't reliably remove ambient "meadow"/"forestGrass" specifically,
+-- both of which TEST_RIG_GRID_LAYERS includes, but normalize-then-clear
+-- does.
+function WailaDebugTools:clearFoliageQuad(x, z)
+    local foliageSystem = g_currentMission.foliageSystem
+    local x0, z0 = x - CLEAR_QUAD_HALF_SIZE, z - CLEAR_QUAD_HALF_SIZE
+    local x1, z1 = x + CLEAR_QUAD_HALF_SIZE, z - CLEAR_QUAD_HALF_SIZE
+    local x2, z2 = x - CLEAR_QUAD_HALF_SIZE, z + CLEAR_QUAD_HALF_SIZE
+
+    if foliageSystem:getIsDecoLayerDefined("grassShort") then
+        foliageSystem:applyDecoFoliage("grassShort", x0, z0, x1, z1, x2, z2)
+    end
+    FSDensityMapUtil.clearDecoArea(x0, z0, x1, z1, x2, z2)
+end
+
+-- Clears every grid point placeFoliageTestRig wrote to, then re-places a
+-- fresh rig at the same origin -- the "press [key] to reset" action
+-- attached to its declared area above. Doesn't try to un-paint the
+-- concrete border -- placeFoliageTestRig repaints it fresh anyway.
+function WailaDebugTools:resetFoliageTestRig(originX, originZ)
+    log("[TestRig] Resetting at origin (%.2f %.2f)", originX, originZ)
+
+    for row, layerName in ipairs(TEST_RIG_GRID_LAYERS) do
+        local pz = originZ + (row - 1) * TEST_RIG_SPACING
+        for state = 0, TEST_RIG_GRID_STATES do
+            local px = originX + state * TEST_RIG_SPACING
+            self:clearFoliageQuad(px, pz)
+        end
+    end
+
+    self:placeFoliageTestRig(originX, originZ)
 end
 
 local function dumpTable(value, prefix, depth, seen)

@@ -300,7 +300,7 @@ function WailaFoliageInspector:inspectPoint(x, z)
         local name, value = decodeFoliageAt(layerData, x, z)
 
         if name ~= nil then
-            table.insert(hits, {name = name, density = value, kind = kindByLayerName[name] or "unknown"})
+            table.insert(hits, WailaFoliageHit.new(name, value, kindByLayerName[name] or "unknown"))
         end
     end
 
@@ -356,7 +356,7 @@ function WailaFoliageInspector:scanArea(centerX, centerZ, size, step)
     local data = self:loadFoliageDebugData()
 
     if data == nil then
-        return {sampleCount = 0, foliage = {}}
+        return WailaFoliageArea.new(0, {})
     end
 
     self:resolveFoliagePlaneIds(data)
@@ -392,8 +392,5 @@ function WailaFoliageInspector:scanArea(centerX, centerZ, size, step)
 
     counts["<empty>"] = math.max(0, samples - occupiedSamples)
 
-    return {
-        sampleCount = samples,
-        foliage = WailaUtil.sortedCounts(counts, samples)
-    }
+    return WailaFoliageArea.new(samples, WailaUtil.sortedCounts(counts, samples))
 end

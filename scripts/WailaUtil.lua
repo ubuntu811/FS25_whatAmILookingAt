@@ -31,6 +31,26 @@ function WailaUtil.value(value)
     return tostring(value)
 end
 
+-- Shared by WailaObject and WailaVehicleInspector -- was duplicated
+-- identically in both before this existed.
+function WailaUtil.getObjectName(object)
+    if object == nil then
+        return nil
+    end
+
+    for _, methodName in ipairs({ "getFullName", "getName" }) do
+        local method = object[methodName]
+        if method ~= nil then
+            local value = WailaUtil.safeCall(nil, method, object)
+            if value ~= nil and value ~= "" then
+                return tostring(value)
+            end
+        end
+    end
+
+    return object.configFileName or object.className
+end
+
 function WailaUtil.className(object)
     if object == nil then
         return nil
@@ -67,6 +87,28 @@ function WailaUtil.rigidBodyTypeName(value)
     end
 
     return tostring(value)
+end
+
+-- Polygon2D:getIsPosInside does a horizontal ray-cast internally
+-- (MathUtil.getLineSegmentsIntersection against a fixed (x,z)->(100000,z)
+-- ray) -- confirmed live, spamming the log thousands of times per minute,
+-- that this throws "Divide by zero error" when the polygon has an edge
+-- exactly parallel to that ray (the line-intersection math's denominator
+-- is a cross product, zero for parallel segments). The base game's own
+-- hand-authored field polygons rarely have an exactly-horizontal edge;
+-- WailaFieldBoundaryTracer's traced boundaries do constantly -- the
+-- tracer only ever steps in the 4 cardinal directions, so a straight
+-- (very common) field edge is often exactly horizontal by construction.
+-- Wrapped everywhere WAILA calls getIsPosInside on any polygon (our own
+-- traced ones AND rice fields' authored ones, for the same safety) rather
+-- than only the confirmed-triggering call sites -- cheap, and the failure
+-- mode (treat as "not inside", same as any other query miss) is safe
+-- everywhere this gets called.
+function WailaUtil.getIsPosInsidePolygon(polygon, x, z)
+    if polygon == nil then
+        return false
+    end
+    return WailaUtil.safeCall(false, polygon.getIsPosInside, polygon, x, z)
 end
 
 function WailaUtil.sortedCounts(counts, total)

@@ -44,3 +44,4 @@ a guarantee - the real test is calling it and checking the result.
 - [TreePlantManager.md](TreePlantManager.md) - tree placement
 - [DensityMapModifier.md](DensityMapModifier.md) - low-level density map writes (unverified)
 - [VehicleActionEvents.md](VehicleActionEvents.md) - the correct way to bind a key that only works in-vehicle
+- [CrossMod.md](CrossMod.md) - talking between two mods: why a mod-declared global (or event key) is invisible to other mods, the g_currentMission-publishing pattern that actually works, and how to fire/catch a g_messageCenter event across mods

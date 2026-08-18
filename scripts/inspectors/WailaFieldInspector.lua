@@ -11,67 +11,29 @@ end
 -- farmland id == field id for the common case. That's the real base-game
 -- function for "what field is at this position", not a raycast target --
 -- fields have no collision mesh of their own to hit.
+--
+-- Returns (field, farmlandId) -- farmlandId is exposed separately (not
+-- just field:getId()) because farmland ownership and field registration
+-- are two different things: a farmland is a whole land parcel (typically
+-- a large, irregular, often forest-including polygon used for the
+-- buy/sell-land system), while a Field is the specific farmable area
+-- registered within it. Standing in forest that's still part of the SAME
+-- farmland number as a distant crop field is real, expected base-game
+-- behavior, not a bug -- confirmed live (a "Field 14" HUD result while
+-- standing in dense forest nowhere near field 14's own crop rows) that
+-- this distinction matters enough to show both, not just the field.
 function WailaFieldInspector:getFieldAtPosition(x, z)
     if g_farmlandManager == nil or g_fieldManager == nil then
-        return nil
+        return nil, nil
     end
 
     local farmland = g_farmlandManager:getFarmlandAtWorldPosition(x, z)
     if farmland == nil then
-        return nil
+        return nil, nil
     end
 
-    return g_fieldManager:getFieldById(farmland:getId())
-end
-
--- Builds the display table from any FieldState -- shared by both the
--- registered-Field path and the unregistered-ground fallback below, since
--- FieldState itself doesn't care which one produced it (see fieldId==nil
--- comment in inspectPoint for why they can diverge at all).
-function WailaFieldInspector:buildResult(fieldState, field)
-    local fruitTypeName = nil
-    local growthStateName = nil
-    if fieldState.fruitTypeIndex ~= FruitType.UNKNOWN then
-        local desc = g_fruitTypeManager:getFruitTypeByIndex(fieldState.fruitTypeIndex)
-        if desc ~= nil then
-            fruitTypeName = desc.name
-            growthStateName = desc:getGrowthStateName(fieldState.growthState)
-        end
-    end
-
-    local groundSystem = g_currentMission.fieldGroundSystem
-    local maxPlowLevel = groundSystem ~= nil and groundSystem:getMaxValue(FieldDensityMap.PLOW_LEVEL) or nil
-    local maxLimeLevel = groundSystem ~= nil and groundSystem:getMaxValue(FieldDensityMap.LIME_LEVEL) or nil
-    local maxSprayLevel = groundSystem ~= nil and groundSystem:getMaxValue(FieldDensityMap.SPRAY_LEVEL) or nil
-
-    local weededState = nil
-    if g_currentMission.weedSystem ~= nil and fieldState.weedState ~= nil then
-        weededState = g_currentMission.weedSystem:getWeededState(fieldState.weedState)
-    end
-
-    return {
-        fieldId = field ~= nil and field:getId() or nil,
-        areaHa = field ~= nil and field:getAreaHa() or nil,
-        ownerFarmId = field ~= nil and field:getOwner() or nil,
-        isValid = fieldState.isValid,
-        grassMissionOnly = field ~= nil and field.grassMissionOnly or nil,
-        fruitTypeName = fruitTypeName,
-        growthState = fieldState.growthState,
-        growthStateName = growthStateName,
-        groundTypeName = FieldGroundType.getName(fieldState.groundType),
-        weedState = fieldState.weedState,
-        weededState = weededState,
-        stoneLevel = fieldState.stoneLevel,
-        sprayTypeName = FieldSprayType.getName(fieldState.sprayType),
-        sprayLevel = fieldState.sprayLevel,
-        maxSprayLevel = maxSprayLevel,
-        limeLevel = fieldState.limeLevel,
-        maxLimeLevel = maxLimeLevel,
-        plowLevel = fieldState.plowLevel,
-        maxPlowLevel = maxPlowLevel,
-        rollerLevel = fieldState.rollerLevel,
-        stubbleShredLevel = fieldState.stubbleShredLevel,
-    }
+    local farmlandId = farmland:getId()
+    return g_fieldManager:getFieldById(farmlandId), farmlandId
 end
 
 -- field:updateState() + field:getFieldState() are the real per-field job-
@@ -93,10 +55,10 @@ end
 -- density-map reader), instead of returning nothing for genuinely farmable
 -- ground just because no map author registered it.
 function WailaFieldInspector:inspectPoint(x, y, z)
-    local field = self:getFieldAtPosition(x, z)
+    local field, farmlandId = self:getFieldAtPosition(x, z)
     if field ~= nil then
         field:updateState()
-        return self:buildResult(field:getFieldState(), field)
+        return WailaField.new(field:getFieldState(), field, farmlandId)
     end
 
     local isOnField = FSDensityMapUtil.getFieldDataAtWorldPosition(x, y, z)
@@ -106,5 +68,5 @@ function WailaFieldInspector:inspectPoint(x, y, z)
 
     local fieldState = FieldState.new()
     fieldState:update(x, z)
-    return self:buildResult(fieldState, nil)
+    return WailaField.new(fieldState, nil, farmlandId)
 end
