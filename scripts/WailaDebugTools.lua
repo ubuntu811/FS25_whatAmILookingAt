@@ -34,6 +34,22 @@ local TEST_RIG_GRID_LAYERS = {
     "greenBean", "maize", "oat", "oilseedRadish", "olive", "onion",
     "parsnip", "pea", "potato", "rice", "riceLongGrain", "sorghum",
     "soybean", "spinach", "sugarBeet", "sugarCane", "sunflower", "wheat",
+    -- FS25_CreativeHorizonIW's own layer set - the original list above
+    -- predates that map's IW integration entirely, so none of its own
+    -- decoFoliage regional variants or "cheese the system" crop layers
+    -- (see that map's own iw-map.xml) were ever in this grid. Same
+    -- "don't assume, read the result" reasoning - undefined on whatever
+    -- map is currently loaded just means an empty cell, not an error.
+    "decoFoliageAS", "decoFoliageUS", "decoBushEU", "decoStones", "poplar",
+    "grass", "fieldGrass",
+    -- This map's own "New crops" (per its modDesc.xml description) -
+    -- the actual point of the complaint that led here: these were
+    -- declared in iw-map.xml but never added to THIS grid, so the test
+    -- rig couldn't show them regardless of how IW's own palette weighted
+    -- them.
+    "rye", "spelt", "triticale", "greenRye", "vetchRye", "mustard",
+    "humusactive", "silageMaize", "floweringCatchCrop", "winterWheat",
+    "winterBarley", "alfalfa", "clover",
 }
 local TEST_RIG_GRID_MAX_STATE = {
     forestGrass = 1,
@@ -87,11 +103,11 @@ function WailaDebugTools.new()
     Waila.registerAreaType(WailaDebugTools.TEST_RIG_AREA_TYPE, {
         actionLabel = "Reset foliage test rig",
         actionCallback = function(area)
-            self:resetFoliageTestRig(area.metadata.originX, area.metadata.originZ)
+            self:resetFoliageTestRig(area.metadata.originX, area.metadata.originZ, area.metadata.rotationY)
         end,
         deleteCallback = function(area)
-            self:clearFoliageTestRigGrid(area.metadata.originX, area.metadata.originZ)
-            self:clearConcreteBorder(area.metadata.originX, area.metadata.originZ)
+            self:clearFoliageTestRigGrid(area.metadata.originX, area.metadata.originZ, area.metadata.rotationY)
+            self:clearConcreteBorder(area.metadata.originX, area.metadata.originZ, area.metadata.rotationY)
         end,
     })
 
@@ -298,21 +314,106 @@ function WailaDebugTools:dumpGroundDensityProbe(hx, hy, hz)
     end
 end
 
--- Shared by placeFoliageTestRig (paints the concrete outline) and
--- clearConcreteBorder (repaints dirt over the exact same outline on
--- delete) -- was duplicated inline in placeFoliageTestRig until
--- clearConcreteBorder needed the identical bounds.
-local function computeTestRigBorderBounds(originX, originZ)
-    local borderMargin = 1.0
-    local borderMinX = originX - borderMargin
-    local borderMaxX = originX + TEST_RIG_GRID_STATES * TEST_RIG_SPACING + borderMargin
-    local borderMinZ = originZ - borderMargin
-    local borderMaxZ = originZ + (#TEST_RIG_GRID_LAYERS - 1) * TEST_RIG_SPACING + borderMargin
-    return borderMinX, borderMaxX, borderMinZ, borderMaxZ
+-- Real angle-control problem found live: the rig used to be pure
+-- axis-aligned offsets from origin, no rotation input anywhere -- placed
+-- via a raw debug button with whatever direction the last raycast
+-- happened to face, no way to steer it, confirmed live running straight
+-- across a road. rotationY (radians, defaults to 0 = old behavior
+-- exactly) rotates every local offset around the origin before use --
+-- shared by placement AND both clear paths, so a rig placed at an angle
+-- gets cleared at that same angle, not wherever the axis-aligned version
+-- would have painted.
+local function rotateOffset(dx, dz, rotationY)
+    if rotationY == nil or rotationY == 0 then
+        return dx, dz
+    end
+    local cosR, sinR = math.cos(rotationY), math.sin(rotationY)
+    return dx * cosR + dz * sinR, -dx * sinR + dz * cosR
 end
 
-function WailaDebugTools:placeFoliageTestRig(hx, hz)
-    log("[TestRig] --- mapping grid (layer rows x state 0-15 columns) ---")
+-- The 4 corners of the border rectangle, in local (pre-rotation) space,
+-- rotated and translated to world space, in edge order (each consecutive
+-- pair is one straight edge -- true even after rotation, since rotating
+-- a rectangle keeps its edges straight, just no longer axis-aligned).
+-- Shared by the border painter AND computeTestRigBorderBounds, so a
+-- rotated rig's declared-area box and its actual painted outline are
+-- always derived from the identical 4 points.
+local function computeTestRigBorderCorners(originX, originZ, rotationY)
+    local borderMargin = 1.0
+    local localMinX, localMaxX = -borderMargin, TEST_RIG_GRID_STATES * TEST_RIG_SPACING + borderMargin
+    local localMinZ, localMaxZ = -borderMargin, (#TEST_RIG_GRID_LAYERS - 1) * TEST_RIG_SPACING + borderMargin
+    local localCorners = {
+        { localMinX, localMinZ }, { localMaxX, localMinZ },
+        { localMaxX, localMaxZ }, { localMinX, localMaxZ },
+    }
+    local corners = {}
+    for i, corner in ipairs(localCorners) do
+        local dx, dz = rotateOffset(corner[1], corner[2], rotationY)
+        corners[i] = { originX + dx, originZ + dz }
+    end
+    return corners
+end
+
+-- Axis-aligned bounding box around the (possibly rotated) corners --
+-- WAILA's own box-type declared area has no rotation concept at all
+-- (see WailaDeclaredArea.lua, plain minX/maxX/minZ/maxZ), so this is
+-- deliberately a conservative box that fully contains the real rotated
+-- shape, not the shape itself.
+local function computeTestRigBorderBounds(originX, originZ, rotationY)
+    local corners = computeTestRigBorderCorners(originX, originZ, rotationY)
+    local minX, maxX = corners[1][1], corners[1][1]
+    local minZ, maxZ = corners[1][2], corners[1][2]
+    for i = 2, 4 do
+        minX = math.min(minX, corners[i][1])
+        maxX = math.max(maxX, corners[i][1])
+        minZ = math.min(minZ, corners[i][2])
+        maxZ = math.max(maxZ, corners[i][2])
+    end
+    return minX, maxX, minZ, maxZ
+end
+
+-- Steps along each of the 4 (possibly rotated) edges in AREA_FILL_STEP
+-- increments, painting layerId at every step -- replaces the old fixed-
+-- axis "step X at min/max Z, step Z at min/max X" loop, which only ever
+-- traced an axis-aligned rectangle. Linear interpolation between two
+-- corners still traces a straight line post-rotation (rotation preserves
+-- straightness), so this is exact, not an approximation.
+local function paintTestRigBorder(self, corners, layerId)
+    for i = 1, 4 do
+        local ax, az = corners[i][1], corners[i][2]
+        local bx, bz = corners[i % 4 + 1][1], corners[i % 4 + 1][2]
+        local edgeLength = math.sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az))
+        local numSteps = math.max(1, math.floor(edgeLength / AREA_FILL_STEP))
+        for step = 0, numSteps do
+            local t = step / numSteps
+            self:paintTerrainAtLayer(ax + (bx - ax) * t, az + (bz - az) * t, layerId)
+        end
+    end
+end
+
+-- Split out so a real placeable (see PlaceableWailaTestRig) can
+-- re-assert its declared area on every reload without repainting
+-- anything -- terrain writes persist on their own (density map data,
+-- not placeable state), only WAILA's own in-memory registry needs
+-- re-asserting. wailaID optional, nil lets Waila.registerArea
+-- auto-generate one (the plain debug-hub button's own use case, no
+-- stable identity to derive one from); a placeable passes its own
+-- stable id (derived from getUniqueId()) so repeated calls upsert
+-- instead of accumulating duplicates, same fix Daisychain's own
+-- registerWithWaila needed for the identical reason.
+function WailaDebugTools:registerTestRigArea(originX, originZ, rotationY, wailaID)
+    local minX, maxX, minZ, maxZ = computeTestRigBorderBounds(originX, originZ, rotationY)
+    return Waila.registerArea({
+        type = WailaDebugTools.TEST_RIG_AREA_TYPE,
+        wailaID = wailaID,
+        box = { minX = minX, maxX = maxX, minZ = minZ, maxZ = maxZ },
+        metadata = { originX = originX, originZ = originZ, rotationY = rotationY },
+    })
+end
+
+function WailaDebugTools:placeFoliageTestRig(hx, hz, rotationY, wailaID)
+    rotationY = rotationY or 0
+    log("[TestRig] --- mapping grid (layer rows x state 0-15 columns), rotationY=%.3f ---", rotationY)
 
     -- Declared-area dogfood case: re-placing the rig should replace its
     -- own area, not accumulate a fresh stale rectangle on top of every
@@ -329,8 +430,8 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
     local existingIndex = Waila.indices[WailaDebugTools.TEST_RIG_AREA_TYPE]
     if existingIndex ~= nil and existingIndex.className == WailaAreaIndex.MARKER then
         for _, existingArea in ipairs(existingIndex:getAll()) do
-            self:clearFoliageTestRigGrid(existingArea.metadata.originX, existingArea.metadata.originZ)
-            self:clearConcreteBorder(existingArea.metadata.originX, existingArea.metadata.originZ)
+            self:clearFoliageTestRigGrid(existingArea.metadata.originX, existingArea.metadata.originZ, existingArea.metadata.rotationY)
+            self:clearConcreteBorder(existingArea.metadata.originX, existingArea.metadata.originZ, existingArea.metadata.rotationY)
         end
         existingIndex:clear()
     end
@@ -338,11 +439,11 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
     local concreteLayerId = self:getTerrainLayerIdByName("CONCRETEINDUSTRIAL")
 
     for row, layerName in ipairs(TEST_RIG_GRID_LAYERS) do
-        local pz = hz + (row - 1) * TEST_RIG_SPACING
         local maxState = TEST_RIG_GRID_MAX_STATE[layerName] or TEST_RIG_GRID_STATES
 
         for state = 0, TEST_RIG_GRID_STATES do
-            local px = hx + state * TEST_RIG_SPACING
+            local dx, dz = rotateOffset(state * TEST_RIG_SPACING, (row - 1) * TEST_RIG_SPACING, rotationY)
+            local px, pz = hx + dx, hz + dz
             local name = layerName .. "_s" .. state
             local ok = self:placeFoliage(px, pz, name)
             log("[TestRig] [grid %s x%d] %s at (%.2f %.2f) -> %s", layerName, state, name, px, pz, tostring(ok))
@@ -353,18 +454,16 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
         end
     end
 
-    local borderMinX, borderMaxX, borderMinZ, borderMaxZ = computeTestRigBorderBounds(hx, hz)
+    local corners = computeTestRigBorderCorners(hx, hz, rotationY)
 
     if concreteLayerId ~= nil then
-        for px = borderMinX, borderMaxX, AREA_FILL_STEP do
-            self:paintTerrainAtLayer(px, borderMinZ, concreteLayerId)
-            self:paintTerrainAtLayer(px, borderMaxZ, concreteLayerId)
-        end
-        for pz = borderMinZ, borderMaxZ, AREA_FILL_STEP do
-            self:paintTerrainAtLayer(borderMinX, pz, concreteLayerId)
-            self:paintTerrainAtLayer(borderMaxX, pz, concreteLayerId)
-        end
-        log("[TestRig] border painted: X[%.2f, %.2f] Z[%.2f, %.2f]", borderMinX, borderMaxX, borderMinZ, borderMaxZ)
+        paintTestRigBorder(self, corners, concreteLayerId)
+        log("[TestRig] border painted around corners=%s", table.concat({
+            string.format("(%.1f,%.1f)", corners[1][1], corners[1][2]),
+            string.format("(%.1f,%.1f)", corners[2][1], corners[2][2]),
+            string.format("(%.1f,%.1f)", corners[3][1], corners[3][2]),
+            string.format("(%.1f,%.1f)", corners[4][1], corners[4][2]),
+        }, " "))
     else
         log("[TestRig] CONCRETEINDUSTRIAL layer not found, skipping border")
     end
@@ -373,12 +472,8 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz)
     -- here anymore -- they're registered once by TYPE instead (see
     -- WailaDebugTools.new()), which also covers an area restored from
     -- waila.xml, not just a freshly-placed one.
-    Waila.registerArea({
-        type = WailaDebugTools.TEST_RIG_AREA_TYPE,
-        box = { minX = borderMinX, maxX = borderMaxX, minZ = borderMinZ, maxZ = borderMaxZ },
-        metadata = { originX = hx, originZ = hz },
-    })
-    log("[TestRig] declared area registered, origin=(%.2f %.2f)", hx, hz)
+    self:registerTestRigArea(hx, hz, rotationY, wailaID)
+    log("[TestRig] declared area registered, origin=(%.2f %.2f) rotationY=%.3f", hx, hz, rotationY)
 end
 
 -- Meters -- half-size of the clearing quad per grid point. Was 1.0
@@ -429,15 +524,16 @@ end
 -- loop walks, so neither existing cleanup path touched them. Mirrors
 -- placeFoliageTestRig's own condition exactly, just painting dirt01
 -- instead of concrete.
-function WailaDebugTools:clearFoliageTestRigGrid(originX, originZ)
+function WailaDebugTools:clearFoliageTestRigGrid(originX, originZ, rotationY)
+    rotationY = rotationY or 0
     local dirtLayerId = self:getTerrainLayerIdByName("dirt01")
 
     for row, layerName in ipairs(TEST_RIG_GRID_LAYERS) do
-        local pz = originZ + (row - 1) * TEST_RIG_SPACING
         local maxState = TEST_RIG_GRID_MAX_STATE[layerName] or TEST_RIG_GRID_STATES
 
         for state = 0, TEST_RIG_GRID_STATES do
-            local px = originX + state * TEST_RIG_SPACING
+            local dx, dz = rotateOffset(state * TEST_RIG_SPACING, (row - 1) * TEST_RIG_SPACING, rotationY)
+            local px, pz = originX + dx, originZ + dz
             self:clearFoliageQuad(px, pz)
 
             if state > maxState and dirtLayerId ~= nil then
@@ -454,24 +550,16 @@ end
 -- see GROUND_LAYER_NAMES) as a reasonable default rather than trying to
 -- remember/restore whatever layer was actually there before the rig was
 -- placed, which was never recorded anywhere.
-function WailaDebugTools:clearConcreteBorder(originX, originZ)
+function WailaDebugTools:clearConcreteBorder(originX, originZ, rotationY)
     local dirtLayerId = self:getTerrainLayerIdByName("dirt01")
     if dirtLayerId == nil then
         log("[TestRig] dirt01 layer not found, skipping border cleanup")
         return
     end
 
-    local borderMinX, borderMaxX, borderMinZ, borderMaxZ = computeTestRigBorderBounds(originX, originZ)
-
-    for px = borderMinX, borderMaxX, AREA_FILL_STEP do
-        self:paintTerrainAtLayer(px, borderMinZ, dirtLayerId)
-        self:paintTerrainAtLayer(px, borderMaxZ, dirtLayerId)
-    end
-    for pz = borderMinZ, borderMaxZ, AREA_FILL_STEP do
-        self:paintTerrainAtLayer(borderMinX, pz, dirtLayerId)
-        self:paintTerrainAtLayer(borderMaxX, pz, dirtLayerId)
-    end
-    log("[TestRig] border repainted with dirt01: X[%.2f, %.2f] Z[%.2f, %.2f]", borderMinX, borderMaxX, borderMinZ, borderMaxZ)
+    local corners = computeTestRigBorderCorners(originX, originZ, rotationY or 0)
+    paintTestRigBorder(self, corners, dirtLayerId)
+    log("[TestRig] border repainted with dirt01 around origin=(%.2f %.2f) rotationY=%.3f", originX, originZ, rotationY or 0)
 end
 
 -- Clears the grid, then re-places a fresh rig at the same origin -- the
@@ -483,9 +571,9 @@ end
 -- just a thin, differently-named entry point -- kept separate from a
 -- bare placeFoliageTestRig call since "Reset" is a distinct, named
 -- action in the hub/world-key UI, not because it needs different logic.
-function WailaDebugTools:resetFoliageTestRig(originX, originZ)
-    log("[TestRig] Resetting at origin (%.2f %.2f)", originX, originZ)
-    self:placeFoliageTestRig(originX, originZ)
+function WailaDebugTools:resetFoliageTestRig(originX, originZ, rotationY)
+    log("[TestRig] Resetting at origin (%.2f %.2f) rotationY=%.3f", originX, originZ, rotationY or 0)
+    self:placeFoliageTestRig(originX, originZ, rotationY)
 end
 
 local function dumpTable(value, prefix, depth, seen)

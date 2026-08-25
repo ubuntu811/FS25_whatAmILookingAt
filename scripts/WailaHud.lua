@@ -464,7 +464,12 @@ function WailaHud:draw(inspection, areaSize, areaStep)
             end
 
             self:addLine(lines, string.format("Crop: %s  growth=%s(%s)", WailaUtil.value(field.fruitTypeName), WailaUtil.value(field.growthStateName), WailaUtil.value(field.growthState)))
-            self:addLine(lines, string.format("Ground: %s  plow=%s/%s  roller=%s  stubble=%s", WailaUtil.value(field.groundTypeName), WailaUtil.value(field.plowLevel), WailaUtil.value(field.maxPlowLevel), WailaUtil.value(field.rollerLevel), WailaUtil.value(field.stubbleShredLevel)))
+            -- useRolling appended here as a live, one-glance check --
+            -- no Lua assignment anywhere in the decompiled scripts (native
+            -- platform-capability flag, not a game setting), so this is
+            -- the only way to actually see its real value instead of
+            -- guessing why R never shows up on any field's job letters.
+            self:addLine(lines, string.format("Ground: %s  plow=%s/%s  roller=%s  stubble=%s  useRolling=%s", WailaUtil.value(field.groundTypeName), WailaUtil.value(field.plowLevel), WailaUtil.value(field.maxPlowLevel), WailaUtil.value(field.rollerLevel), WailaUtil.value(field.stubbleShredLevel), WailaUtil.bool(Platform.gameplay.useRolling)))
             self:addLine(lines, string.format("Weed: state=%s weededState=%s  stone=%s  grassOnly=%s", WailaUtil.value(field.weedState), WailaUtil.value(field.weededState), WailaUtil.value(field.stoneLevel), WailaUtil.bool(field.grassMissionOnly)))
             self:addLine(lines, string.format("Spray: %s  level=%s/%s  lime=%s/%s", WailaUtil.value(field.sprayTypeName), WailaUtil.value(field.sprayLevel), WailaUtil.value(field.maxSprayLevel), WailaUtil.value(field.limeLevel), WailaUtil.value(field.maxLimeLevel)))
         end

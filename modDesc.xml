@@ -42,7 +42,29 @@
         <sourceFile filename="scripts/WailaHud.lua" />
         <sourceFile filename="scripts/WailaDebugHubDialog.lua" />
         <sourceFile filename="scripts/FS25WhatAmILookingAt.lua" />
+        <sourceFile filename="scripts/PlaceableWailaTestRig.lua" />
     </extraSourceFiles>
+
+    <!-- Same shape Daisychain's own daisychainFlowerPatch type uses:
+         bare placeable, hand-picked specialization list. Standard
+         "placement" specialization only (no custom brush needed, see
+         xml/testRigPlaceable.xml's own comment; this is plain
+         point+rotation, which the engine's construction flow already
+         handles natively). -->
+    <placeableTypes>
+        <type name="wailaFoliageTestRig" parent="placeable" filename="$dataS/scripts/placeables/Placeable.lua">
+            <specialization name="placement"/>
+            <specialization name="wailaFoliageTestRig"/>
+        </type>
+    </placeableTypes>
+
+    <placeableSpecializations>
+        <specialization name="wailaFoliageTestRig" className="PlaceableWailaTestRig" filename="scripts/PlaceableWailaTestRig.lua"/>
+    </placeableSpecializations>
+
+    <storeItems>
+        <storeItem xmlFilename="xml/testRigPlaceable.xml"/>
+    </storeItems>
 
     <actions>
         <!-- No category attribute: category="ONFOOT" made the engine
@@ -91,6 +113,10 @@
         <text name="input_WAILA_DEBUG_HUB">
             <en>Open WAILA debug hub</en>
             <de>WAILA-Debug-Hub öffnen</de>
+        </text>
+        <text name="storeItem_title_wailaFoliageTestRig">
+            <en>Foliage Test Rig</en>
+            <de>Bewuchs-Testaufbau</de>
         </text>
     </l10n>
 </modDesc>

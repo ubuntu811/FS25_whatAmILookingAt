@@ -146,9 +146,20 @@ function FS25WhatAmILookingAt:setupComponents()
         { label = "Toggle field-tracing debug view", run = function() mod:onToggleFieldTracingDebug() end },
     })
 
+    -- box only ever stores {minX, maxX, minZ, maxZ} (see
+    -- WailaDeclaredArea.lua) -- no Y at all, so there's nothing to read
+    -- back, only terrain height to sample. Same trick already used
+    -- elsewhere in this file for field label rendering and
+    -- WailaDeclaredArea:drawDebug's own corner lines -- not the area's
+    -- true object-space Y (which could differ, e.g. a placeable root
+    -- repositioned above/below its own footprint), just a reasonable
+    -- stand-in so a list of areas isn't guessing whether one is buried.
     local function describeAreaPosition(area)
         if area.box ~= nil then
-            return string.format("%.0f, %.0f", (area.box.minX + area.box.maxX) / 2, (area.box.minZ + area.box.maxZ) / 2)
+            local centerX = (area.box.minX + area.box.maxX) / 2
+            local centerZ = (area.box.minZ + area.box.maxZ) / 2
+            local centerY = getTerrainHeightAtWorldPos(g_terrainNode, centerX, 0, centerZ)
+            return string.format("%.0f, %.0f, %.0f", centerX, centerY, centerZ)
         end
         return "-"
     end
@@ -187,6 +198,14 @@ function FS25WhatAmILookingAt:setupComponents()
     -- shared. This is the real integration point for SmartMinimapAuto
     -- (or anything else) to read.
     g_currentMission.waila = Waila
+
+    -- Same reasoning as g_currentMission.waila just above: even though
+    -- the new wailaFoliageTestRig placeable lives in this same mod,
+    -- plain Lua globals/instance fields still aren't reachable from a
+    -- specialization file without some shared handle -- this is that
+    -- handle, one instance, matching what the debug hub button already
+    -- calls through self.debugTools.
+    g_currentMission.wailaDebugTools = self.debugTools
 
     -- Self-test: WAILA subscribing to its own event, just to confirm the
     -- whole pipeline (scan -> registry -> vehicle-leave detection -> fire)

@@ -54,12 +54,30 @@ end
 -- point (FieldState doesn't require a Field to operate on, it's just a
 -- density-map reader), instead of returning nothing for genuinely farmable
 -- ground just because no map author registered it.
+-- Real live bug found on a map with multiple actual fields sharing one
+-- farmland id: getFieldAtPosition's farmland->getFieldById substitution
+-- mirrors a genuine base-game assumption (confirmed: FieldManager's own
+-- getFieldIdAtPlayerPosition does the identical farmland:getId()
+-- substitution, no getFieldById call at all -- this isn't a WAILA
+-- mistake, it's the base game's own standing "farmland id ~= field id
+-- but close enough" shortcut). That assumption holds for the common
+-- one-field-per-farmland map but not here -- field:getId() itself
+-- delegates to its farmland's id (confirmed, Field.lua), so two
+-- genuinely different fields under the same farmland report the SAME
+-- id, making getFieldById(farmlandId) structurally ambiguous: whichever
+-- field last claimed that id wins, for every query under that farmland,
+-- regardless of which one you're actually standing in.
+--
+-- Real fix: never let the resolved field object's own cached state gate
+-- what gets shown. field/farmlandId are kept purely as loose,
+-- informational context (still useful -- "which farmland owns this
+-- ground" is real and often correct) -- the actual status always comes
+-- from the same direct, position-accurate density-map read the no-field
+-- fallback path already used, since that's the one thing here that
+-- doesn't depend on the original map's authored Field/Farmland structure
+-- at all, only on what's actually planted/tilled right now.
 function WailaFieldInspector:inspectPoint(x, y, z)
     local field, farmlandId = self:getFieldAtPosition(x, z)
-    if field ~= nil then
-        field:updateState()
-        return WailaField.new(field:getFieldState(), field, farmlandId)
-    end
 
     local isOnField = FSDensityMapUtil.getFieldDataAtWorldPosition(x, y, z)
     if not isOnField then
@@ -68,5 +86,5 @@ function WailaFieldInspector:inspectPoint(x, y, z)
 
     local fieldState = FieldState.new()
     fieldState:update(x, z)
-    return WailaField.new(fieldState, nil, farmlandId)
+    return WailaField.new(fieldState, field, farmlandId)
 end
