@@ -8,6 +8,27 @@ FS25WhatAmILookingAt = {}
 -- assignment). Needed for g_gui:loadGui's XML path below.
 FS25WhatAmILookingAt.MOD_DIRECTORY = g_currentModDirectory
 
+-- Real, required registration -- confirmed missing entirely, caught live
+-- via "no addConstructionTab refs in waila" while chasing why the new
+-- wailaFoliageTestRig placeable's own <tab>waila</tab> reference never
+-- produced an actual tab. Declaring a tab name in a store item's xml
+-- does nothing by itself; the tab has to be created explicitly. Same
+-- real, proven pattern (and the same two failed timing attempts before
+-- it) Daisychain's own FS25Daisychain.lua already documents: top-level
+-- code runs before the "decoration" category exists yet
+-- (addConstructionTab silently no-ops on a nil category, no error at
+-- all), loadMap() runs too late (well after loadMapData() has already
+-- validated every store item's <brush><tab> reference). Overwriting
+-- StoreManager.loadMapData itself lands exactly between those two
+-- failure points -- superFunc() creates the category and queues (but
+-- doesn't yet resolve) every store item's async load, so the tab exists
+-- by the time any of them are actually checked against it.
+local function loadConstructionTab(self, superFunc, xmlFile, missionInfo, baseDirectory)
+    superFunc(self, xmlFile, missionInfo, baseDirectory)
+    g_storeManager:addConstructionTab("decoration", "waila", "WAILA", nil, nil, FS25WhatAmILookingAt.MOD_DIRECTORY, nil)
+end
+StoreManager.loadMapData = Utils.overwrittenFunction(StoreManager.loadMapData, loadConstructionTab)
+
 local function log(formatString, ...)
     Logging.info("[WhatAmILookingAt] " .. formatString, ...)
 end
