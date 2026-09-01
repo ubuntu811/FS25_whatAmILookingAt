@@ -15,6 +15,10 @@ function PlaceableWailaTestRig.prerequisitesPresent(specializations)
     return true
 end
 
+function PlaceableWailaTestRig.registerFunctions(placeableType)
+    SpecializationUtil.registerFunction(placeableType, "startPlacementCheck", PlaceableWailaTestRig.startPlacementCheck)
+end
+
 function PlaceableWailaTestRig.registerEventListeners(placeableType)
     SpecializationUtil.registerEventListener(placeableType, "onLoad", PlaceableWailaTestRig)
     SpecializationUtil.registerEventListener(placeableType, "onPostFinalizePlacement", PlaceableWailaTestRig)
@@ -70,7 +74,12 @@ function PlaceableWailaTestRig:onPostFinalizePlacement()
         -- real placed position/rotation instead of a raycast guess.
         local x, _, z = getWorldTranslation(self.rootNode)
         local _, rotY, _ = getRotation(self.rootNode)
-        debugTools:placeFoliageTestRig(x, z, rotY, wailaID)
+        -- clearExisting=false -- real bug found live: without it, placing
+        -- a second rig wiped the first, since placeFoliageTestRig used to
+        -- unconditionally clear every existing rig of this type before
+        -- painting a new one (fine for the old singleton debug-hub button,
+        -- wrong now that multiple rigs can coexist as real placeables).
+        debugTools:placeFoliageTestRig(x, z, rotY, wailaID, false)
         spec.originX, spec.originZ, spec.rotationY = x, z, rotY
     else
         -- Reload: terrain painting already persisted on its own, only
@@ -78,6 +87,47 @@ function PlaceableWailaTestRig:onPostFinalizePlacement()
         -- registerTestRigArea's own comment for why this can't just rely
         -- on waila.xml alone.
         debugTools:registerTestRigArea(spec.originX, spec.originZ, spec.rotationY, wailaID)
+    end
+end
+
+-- No visible mesh at all in testRig.i3d (bare TransformGroup), so the
+-- engine's own standard construction preview has nothing to render --
+-- real complaint, confirmed: no way to see where the ~31x(2*numLayers)m
+-- grid will actually land before committing.
+--
+-- startPlacementCheck is the real, confirmed hook for this -- an empty
+-- override stub in the base PlaceablePlacement specialization
+-- (SpecializationUtil.registerFunction'd there, meaning our own
+-- registerFunctions below correctly replaces it since this
+-- specialization is declared after "placement" in modDesc.xml's type
+-- list), called every single frame during the live mouse-follow preview
+-- by ConstructionBrushPlaceable:updatePlaceablePosition() -- confirmed
+-- via decompiled source, not guessed -- with the exact live cursor
+-- x/y/z/rotY, before any snapping/overlap checks. Only fires pre-
+-- finalize, never after, so no separate "stop drawing once placed" logic
+-- needed -- the real terrain border painted on finalize is the
+-- permanent visual from then on.
+--
+-- getTestRigBorderCorners reuses the exact same 4 points the real
+-- border painting uses (see WailaDebugTools.lua), so the preview can
+-- never drift out of sync with what actually gets painted on finalize.
+-- drawDebugLine directly (not a DebugUtil wrapper) -- same real,
+-- confirmed-working primitive WailaDeclaredArea:drawDebug already uses
+-- for its own box outlines.
+function PlaceableWailaTestRig:startPlacementCheck(x, y, z, rotY)
+    local debugTools = g_currentMission.wailaDebugTools
+    if debugTools == nil then
+        return
+    end
+
+    local corners = debugTools:getTestRigBorderCorners(x, z, rotY)
+
+    for i = 1, 4 do
+        local ax, az = corners[i][1], corners[i][2]
+        local bx, bz = corners[i % 4 + 1][1], corners[i % 4 + 1][2]
+        local ay = getTerrainHeightAtWorldPos(g_terrainNode, ax, 0, az) + 0.1
+        local by = getTerrainHeightAtWorldPos(g_terrainNode, bx, 0, bz) + 0.1
+        drawDebugLine(ax, ay, az, 1, 1, 0, bx, by, bz, 1, 1, 0, false)
     end
 end
 

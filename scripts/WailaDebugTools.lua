@@ -401,6 +401,14 @@ end
 -- stable id (derived from getUniqueId()) so repeated calls upsert
 -- instead of accumulating duplicates, same fix Daisychain's own
 -- registerWithWaila needed for the identical reason.
+-- Thin public wrapper so PlaceableWailaTestRig can draw a live preview
+-- outline using the exact same 4 corners the real border painting uses
+-- (see paintTestRigBorder) -- no separate shape math to drift out of
+-- sync with what actually gets painted on finalize.
+function WailaDebugTools:getTestRigBorderCorners(originX, originZ, rotationY)
+    return computeTestRigBorderCorners(originX, originZ, rotationY or 0)
+end
+
 function WailaDebugTools:registerTestRigArea(originX, originZ, rotationY, wailaID)
     local minX, maxX, minZ, maxZ = computeTestRigBorderBounds(originX, originZ, rotationY)
     return Waila.registerArea({
@@ -411,9 +419,20 @@ function WailaDebugTools:registerTestRigArea(originX, originZ, rotationY, wailaI
     })
 end
 
-function WailaDebugTools:placeFoliageTestRig(hx, hz, rotationY, wailaID)
+-- clearExisting (default true) exists ONLY for the plain debug-hub
+-- button's own original singleton behavior -- it never carried a stable
+-- wailaID, so there was never more than one rig conceptually, and
+-- re-running the button was always meant to replace it. Real bug found
+-- live once this became a real, multi-instance placeable: placing a
+-- SECOND rig wiped the first, because this whole block ran unconditionally
+-- for every placement regardless of how many rigs already existed
+-- elsewhere. PlaceableWailaTestRig now explicitly passes false.
+function WailaDebugTools:placeFoliageTestRig(hx, hz, rotationY, wailaID, clearExisting)
     rotationY = rotationY or 0
-    log("[TestRig] --- mapping grid (layer rows x state 0-15 columns), rotationY=%.3f ---", rotationY)
+    if clearExisting == nil then
+        clearExisting = true
+    end
+    log("[TestRig] --- mapping grid (layer rows x state 0-15 columns), rotationY=%.3f clearExisting=%s ---", rotationY, tostring(clearExisting))
 
     -- Declared-area dogfood case: re-placing the rig should replace its
     -- own area, not accumulate a fresh stale rectangle on top of every
@@ -427,7 +446,7 @@ function WailaDebugTools:placeFoliageTestRig(hx, hz, rotationY, wailaID)
     -- the grid/border were freshly painted below, so on a Reset (same
     -- origin as the area being replaced) it immediately wiped the stuff
     -- this same function had just placed a few lines earlier.
-    local existingIndex = Waila.indices[WailaDebugTools.TEST_RIG_AREA_TYPE]
+    local existingIndex = clearExisting and Waila.indices[WailaDebugTools.TEST_RIG_AREA_TYPE] or nil
     if existingIndex ~= nil and existingIndex.className == WailaAreaIndex.MARKER then
         for _, existingArea in ipairs(existingIndex:getAll()) do
             self:clearFoliageTestRigGrid(existingArea.metadata.originX, existingArea.metadata.originZ, existingArea.metadata.rotationY)
