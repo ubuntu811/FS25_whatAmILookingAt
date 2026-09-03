@@ -656,13 +656,15 @@ WailaTrailTracer.SWEEP_DEADLINE_SEC = 10.0
 -- is still one synchronous pass, not WailaFieldGridScanner's own
 -- multi-tick incremental scan.
 --
--- Same mechanism doubles as the fix for a second, related bug: path
--- tiles landing inside an area's own interior (a busy open space's tire
--- tracks/wear noise can locally read as "elongated" even though the
--- whole region is obviously one area, not a trail network -- confirmed
--- live, a fan/star stitching artifact exactly where an area had already
--- traced cleanly). A path-tile whose cell is already claimed by an area
--- is by definition standing inside that area's own footprint.
+-- Same mechanism doubles as the fix for a second, related bug: paths
+-- claim their own territory FIRST (see scanRegion below), so an
+-- area-tile candidate landing on a cell a path already stitched through
+-- is skipped before an area trace is even attempted on it -- "paths
+-- always win first," per explicit instruction, since a track's wear
+-- intensity varying along its length can locally misclassify a single
+-- tile as an "area" (patchy dirt/gravel inside one 8x8m tile), and
+-- without this that one tile could seed a wall-follower that traces the
+-- whole track as a sprawling, jaggedly-retraced area instead.
 local function claimedCellKey(col, row)
     return col * 100000 + row
 end
@@ -705,6 +707,23 @@ local function claimPolygonCells(claimed, points, originX, originZ, cellSize)
                 if WailaUtil.getIsPosInsidePolygon(polygon, x, z) then
                     claimed[key] = true
                 end
+            end
+        end
+    end
+end
+
+-- A stitched path chain isn't a closed shape, so claimPolygonCells'
+-- inside-the-polygon test doesn't apply -- claim a small radius of
+-- cells around each point along the chain instead, wide enough to cover
+-- the tile a real trail tile-scan would classify as belonging to this
+-- same track (TILE_SIZE-wide tiles feeding the classifier this chain
+-- was stitched from in the first place).
+local function claimPathCells(claimed, points, originX, originZ, cellSize)
+    for _, p in ipairs(points) do
+        local col, row = worldToLocalCell(p[1], p[2], originX, originZ, cellSize)
+        for dRow = -1, 1 do
+            for dCol = -1, 1 do
+                claimed[claimedCellKey(col + dCol, row + dRow)] = true
             end
         end
     end
@@ -780,16 +799,37 @@ function WailaTrailTracer.scanRegion(centerX, centerZ)
     -- through the remaining clusters.
     local sweepStartTime = getTimeSec()
 
+    -- Real, confirmed-live bug (reported directly, screenshots of a
+    -- clearly path-shaped worn track traced as a sprawling jagged
+    -- "area" instead): this used to run area-tracing FIRST, claim
+    -- territory, and only filter path-tiles against that claimed grid
+    -- afterward - meaning a single tile along an obviously elongated
+    -- track that happened to locally misclassify as "area" (patchy
+    -- material inside one 8x8m tile) could seed a wall-follower that
+    -- traces the ENTIRE track, and any correctly-classified path-tiles
+    -- nearby then got thrown away for "already being inside an area" -
+    -- exactly backwards. Paths now claim their own territory FIRST;
+    -- area candidates already inside a claimed path cell are skipped
+    -- before an area trace is even attempted on them, not filtered out
+    -- of the result afterward (also saves the wasted trace work itself).
     local claimed = {}
+
+    local paths = WailaTrailTracer.stitchPathTiles(pathAnalyses)
+    for _, chain in ipairs(paths) do
+        claimPathCells(claimed, chain, minX, minZ, tileSize)
+    end
+
     local areas = {}
+    local areaCandidateCount = 0
     for _, analysis in ipairs(areaAnalyses) do
         if getTimeSec() - sweepStartTime > WailaTrailTracer.SWEEP_DEADLINE_SEC then
             log("scanRegion area-tracing phase hit its %.0fs sweep deadline with %d/%d area clusters left unprocessed, stopping early",
-                WailaTrailTracer.SWEEP_DEADLINE_SEC, #areaAnalyses - #areas, #areaAnalyses)
+                WailaTrailTracer.SWEEP_DEADLINE_SEC, #areaAnalyses - areaCandidateCount, #areaAnalyses)
             break
         end
 
         if not isCellClaimed(claimed, analysis.centroidX, analysis.centroidZ, minX, minZ, tileSize) then
+            areaCandidateCount = areaCandidateCount + 1
             local tracer = WailaAreaTracer.new(analysis.centroidX, analysis.centroidZ)
             if tracer ~= nil then
                 local stillTracing = true
@@ -810,7 +850,7 @@ function WailaTrailTracer.scanRegion(centerX, centerZ)
                     guard = guard + 1
                 end
                 local points = tracer:getSimplifiedPoints()
-                if #points >= 3 then
+                if #points >= 3 and getPointsBoundingSpan(points) <= WailaTrailTracer.MAX_AREA_SPAN then
                     table.insert(areas, points)
                     claimPolygonCells(claimed, points, minX, minZ, tileSize)
                 end
@@ -818,23 +858,8 @@ function WailaTrailTracer.scanRegion(centerX, centerZ)
         end
     end
 
-    -- Filtered against the SAME claimed grid the area loop above just
-    -- populated -- a path-tile whose cell an area already claimed is
-    -- standing inside that area's own footprint, not a real trail (see
-    -- this whole grid's own header comment for the confirmed-live bug).
-    -- Filtering before stitching, not after, so the stitcher never even
-    -- sees the noise to chain into a spurious spline.
-    local filteredPathAnalyses = {}
-    for _, analysis in ipairs(pathAnalyses) do
-        if not isCellClaimed(claimed, analysis.centroidX, analysis.centroidZ, minX, minZ, tileSize) then
-            table.insert(filteredPathAnalyses, analysis)
-        end
-    end
-
-    local paths = WailaTrailTracer.stitchPathTiles(filteredPathAnalyses)
-
-    log("scanRegion result: %d path chain(s) from %d path-tile(s) (%d suppressed as inside an area), %d traced area(s) from %d area-tile(s)",
-        #paths, #filteredPathAnalyses, #pathAnalyses - #filteredPathAnalyses, #areas, #areaAnalyses)
+    log("scanRegion result: %d path chain(s) from %d path-tile(s), %d traced area(s) from %d area-tile(s) (%d suppressed as inside a path's own claimed territory)",
+        #paths, #pathAnalyses, #areas, #areaAnalyses, #areaAnalyses - areaCandidateCount)
 
     return { paths = paths, areas = areas }
 end
