@@ -228,6 +228,18 @@ function FS25WhatAmILookingAt:setupComponents()
     -- calls through self.debugTools.
     g_currentMission.wailaDebugTools = self.debugTools
 
+    -- Same rule, same reason -- real bug found live: TaskMap's own
+    -- rebuildTrailHotspots checks the bare WailaTrailTracer global and
+    -- logged "nil (WAILA not loaded/too early?)" on an endless repeating
+    -- timer, never once resolving no matter how long the session ran.
+    -- Not a timing issue at all -- WailaTrailTracer.lua declares itself
+    -- as a bare top-level global (WailaTrailTracer = {}), which only
+    -- ever exists inside THIS mod's own sandbox. Every other cross-mod
+    -- API here already goes through g_currentMission for exactly this
+    -- reason (see Waila.lua's own header comment); this one simply never
+    -- got the same treatment when it was built.
+    g_currentMission.wailaTrailTracer = WailaTrailTracer
+
     -- Self-test: WAILA subscribing to its own event, just to confirm the
     -- whole pipeline (scan -> registry -> vehicle-leave detection -> fire)
     -- actually works end to end before any other mod depends on it.
@@ -251,11 +263,47 @@ end
 -- Waila.reloadAll() (needs a clean slate before setupComponents() runs
 -- again). Debug tabs are unregistered by id, not a wholesale
 -- Waila.debugTabs wipe -- that list can hold other mods' tabs too.
+--
+-- Real bug found live (2026-08-30): Waila.indices (see Waila.lua) is a
+-- plain mod-declared global table, created once at Lua load time for
+-- the whole game process, NOT per-mission - g_currentMission.waila is
+-- just a reference to this SAME table republished each load, never a
+-- fresh one. Nothing here ever cleared it, so every area a third-party
+-- mod registered (confirmed live: FS25_Daisychain's
+-- PlaceableFlowerPolygonArea, one per placed flower patch) stayed
+-- registered past its own placeable's deletion, across the entire
+-- mission teardown. On exit, every one of those placeables' onDelete()
+-- fires and calls back into Waila.unregisterArea, mutating this same
+-- never-reset shared table while the rest of the world is also tearing
+-- down - a real, confirmed crash-on-exit contributor (reproduced live:
+-- disabling Daisychain, or manually clearing all WAILA areas before
+-- exiting, both independently "fixed" it - consistent with this being
+-- the actual shared cause, not two unrelated fixes). Same missing-
+-- cleanup shape self.fieldIndex:stop() already handles for the field
+-- index, just never extended to the generic area-index system.
+-- WailaAreaIndex:clear() already existed for exactly this - reused, not
+-- reinvented.
 function FS25WhatAmILookingAt:teardownComponents()
     g_inputBinding:removeActionEventsByTarget(self)
     g_messageCenter:unsubscribeAll(self)
     if self.fieldIndex ~= nil then
         self.fieldIndex:stop()
+    end
+    -- Real bug found live in THIS fix, the same night it was added:
+    -- Waila.indices doesn't exclusively hold WailaAreaIndex instances -
+    -- Waila.indices.field is a WailaFieldIndex (see this file's own
+    -- Waila.indices.field = self.fieldIndex, in setupComponents), which
+    -- has no :clear() method at all (it's already handled two lines up,
+    -- via self.fieldIndex:stop()). The blind pairs() loop crashed on it
+    -- every time - "attempt to call missing method 'clear' of table",
+    -- confirmed live via a real log.txt trace on exit. Same
+    -- className == WailaAreaIndex.MARKER guard Waila.registerArea
+    -- itself already uses to tell the two apart - reused, not
+    -- reinvented, same as :clear() itself was meant to be.
+    for _, index in pairs(Waila.indices) do
+        if index.className == WailaAreaIndex.MARKER then
+            index:clear()
+        end
     end
     for _, id in ipairs({ "general", "terrain", "foliage", "field", "areas" }) do
         Waila.unregisterDebugTab(id)

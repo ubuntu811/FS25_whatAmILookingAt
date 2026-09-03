@@ -251,6 +251,14 @@ WailaFieldBoundaryTracer.SIMPLIFY_TOLERANCE = 0.5
 -- anything (e.g. inset label placement) would fail almost universally
 -- without this first. points is a list of {x, z} pairs -- same shape
 -- boundaryPositions already uses.
+-- Real length in meters, not squared -- squared units read as
+-- surprisingly tiny at a glance (0.0001 looks negligible, but is
+-- actually a full 1cm segment). This pass exists to simplify anyway, so
+-- there's no fidelity lost being generous here -- a couple points
+-- folding into their neighbor at this scale is exactly the point.
+local MIN_SEGMENT_LENGTH = 0.1
+local MIN_SEGMENT_LENGTH_SQ = MIN_SEGMENT_LENGTH * MIN_SEGMENT_LENGTH
+
 local function simplifyBoundary(points, tolerance)
     local n = #points
     if n < 3 then
@@ -269,17 +277,23 @@ local function simplifyBoundary(points, tolerance)
             local bx, bz = points[endIndex][1], points[endIndex][2]
             local maxDist, maxIndex = 0, nil
 
+            -- The safeCall/pcall wrap below was believed to be a working
+            -- backstop against any degenerate segment toPolygon() doesn't
+            -- already strip -- confirmed WRONG, live, via WailaTrailTracer's
+            -- identical-shaped copy of this same function: the divide-by-
+            -- zero is a genuine engine "Script error", not an ordinary Lua
+            -- error, and it propagated straight through pcall, full call
+            -- stack up through main.lua:update and all. toPolygon() still
+            -- strips the one guaranteed case, but this segLenSq check is
+            -- the actual, confirmed-necessary guard -- checking BEFORE
+            -- calling in, not trying to catch the fault after the fact.
+            local segLenSq = (bx - ax) * (bx - ax) + (bz - az) * (bz - az)
+
             for i = startIndex + 1, endIndex - 1 do
-                -- Defensive: getDistanceToLineSegment2D divides by the
-                -- segment's own squared length internally, zero for a
-                -- degenerate (identical-endpoint) segment. toPolygon()
-                -- below strips the one guaranteed case (finalize()'s own
-                -- closing duplicate) before this ever runs, but this stays
-                -- wrapped too as a backstop against any other case not
-                -- accounted for -- falls back to straight point-to-point
-                -- distance from the segment's start, which is exactly
-                -- correct for a zero-length "segment" anyway.
-                local dist = WailaUtil.safeCall(nil, MathUtil.getDistanceToLineSegment2D, ax, az, bx, bz, points[i][1], points[i][2])
+                local dist
+                if segLenSq > MIN_SEGMENT_LENGTH_SQ then
+                    dist = WailaUtil.safeCall(nil, MathUtil.getDistanceToLineSegment2D, ax, az, bx, bz, points[i][1], points[i][2])
+                end
                 if dist == nil then
                     dist = MathUtil.vector2Length(points[i][1] - ax, points[i][2] - az)
                 end
