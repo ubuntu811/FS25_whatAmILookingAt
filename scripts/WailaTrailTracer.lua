@@ -392,6 +392,18 @@ function WailaAreaTracer.new(x, z)
     self.curX = x
     self.curZ = z
     self.boundaryPositions = {}
+    -- Real, confirmed-live bug: finalize() below force-closes whatever
+    -- partial trace exists into a polygon shape regardless of WHY the
+    -- walk stopped -- a trace that got cut off early (hit a building, a
+    -- stall, the position cap) looks identical, after finalize(), to one
+    -- that genuinely walked all the way back to its own start. That
+    -- produced small, tightly-clipped "areas" hugging whatever structure
+    -- happened to abort the trace, instead of the real, much larger
+    -- material boundary the walk never got to finish (confirmed live:
+    -- a farmyard's dirt yard traced as a shape hugging the building's own
+    -- silhouette instead of the visibly much bigger dirt-to-grass edge).
+    -- Only the natural-closure branch below sets this true.
+    self.closedNaturally = false
 
     if not isTrailMaterialAt(self.curX, self.curZ) then
         return nil
@@ -485,6 +497,7 @@ function WailaAreaTracer:update(frameBudget)
                 self.boundaryPositions[numPositions][2] - self.boundaryPositions[1][2]
             )
             if distance < step then
+                self.closedNaturally = true
                 self:finalize()
                 return false
             end
@@ -850,7 +863,7 @@ function WailaTrailTracer.scanRegion(centerX, centerZ)
                     guard = guard + 1
                 end
                 local points = tracer:getSimplifiedPoints()
-                if #points >= 3 and getPointsBoundingSpan(points) <= WailaTrailTracer.MAX_AREA_SPAN then
+                if tracer.closedNaturally and #points >= 3 and getPointsBoundingSpan(points) <= WailaTrailTracer.MAX_AREA_SPAN then
                     table.insert(areas, points)
                     claimPolygonCells(claimed, points, minX, minZ, tileSize)
                 end
