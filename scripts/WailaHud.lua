@@ -311,6 +311,40 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     self:addLine(lines, string.format("Hit position: %.2f / %.2f / %.2f", hit.x, hit.y, hit.z))
     self:addLine(lines, string.format("Node: %s  name=%s", tostring(hit.nodeId), WailaUtil.value(object and object.nodeName)))
 
+    -- Real, native queries (getCollisionFilterGroup/getCollisionFilterMask,
+    -- confirmed present in the engine's own scriptBinding.xml) -- lets us
+    -- see, directly in-game, whether whatever the raycast just hit actually
+    -- carries CollisionFlag.ROAD (or any other flag) instead of guessing
+    -- from the node's name/kind alone. Decoded against the FULL flag list
+    -- (confirmed live via the "gsCollisionFlagShowAll" console command,
+    -- not guessed) -- deliberately wider than WailaRaycaster's own 10-flag
+    -- hit-test mask, since a node's real collision group can carry flags
+    -- (AI_BLOCKING, AI_DRIVABLE, TRAFFIC_VEHICLE_BLOCKING, etc.) that mask
+    -- never raycasts against but are exactly the diagnostic signal wanted
+    -- here -- e.g. distinguishing "a road" from "something that blocks or
+    -- allows AI vehicle navigation", which are two different flags.
+    do
+        local group = getCollisionFilterGroup(hit.nodeId)
+        local mask = getCollisionFilterMask(hit.nodeId)
+        local flagNames = {}
+        if CollisionFlag ~= nil then
+            for _, name in ipairs({
+                "DEFAULT", "STATIC_OBJECT", "CAMERA_BLOCKING", "GROUND_TIP_BLOCKING",
+                "PLACEMENT_BLOCKING", "AI_BLOCKING", "PRECIPITATION_BLOCKING", "TERRAIN",
+                "TERRAIN_DELTA", "TERRAIN_DISPLACEMENT", "TREE", "BUILDING", "ROAD",
+                "AI_DRIVABLE", "VEHICLE", "VEHICLE_FORK", "DYNAMIC_OBJECT", "TRAFFIC_VEHICLE",
+                "PLAYER", "ANIMAL", "ANIMAL_POSITIONING", "ANIMAL_NAV_MESH_BLOCKING",
+                "TRAFFIC_VEHICLE_BLOCKING", "INTERACTABLE_TARGET", "TRIGGER", "FILLABLE", "WATER"
+            }) do
+                local flag = CollisionFlag[name]
+                if flag ~= nil and bit32.band(group, flag) ~= 0 then
+                    table.insert(flagNames, name)
+                end
+            end
+        end
+        self:addLine(lines, string.format("Collision: group=0x%X mask=0x%X (%s)", group or 0, mask or 0, #flagNames > 0 and table.concat(flagNames, ", ") or "none"))
+    end
+
     -- Any mod-declared area covering this exact hit point (see
     -- Waila.registerArea/WailaDeclaredArea) -- "field" excluded, that
     -- already gets its own dedicated section below. Waila.getTypes loops
