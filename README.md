@@ -44,6 +44,7 @@ HUD is toggled on - the full HUD slides open underneath it.
 ## Current inspection
 
 - raycast target and node ID/name
+- the hit node's real collision group/mask, decoded to flag names (`ROAD`, `BUILDING`, `AI_BLOCKING`, ...)
 - terrain material, field state and ground type
 - foliage layers at the target
 - grouped terrain and foliage statistics for a 5×5 m area
