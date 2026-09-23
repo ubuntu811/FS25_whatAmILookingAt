@@ -326,23 +326,85 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     do
         local group = getCollisionFilterGroup(hit.nodeId)
         local mask = getCollisionFilterMask(hit.nodeId)
-        local flagNames = {}
+        local ALL_FLAG_NAMES = {
+            "DEFAULT", "STATIC_OBJECT", "CAMERA_BLOCKING", "GROUND_TIP_BLOCKING",
+            "PLACEMENT_BLOCKING", "AI_BLOCKING", "PRECIPITATION_BLOCKING", "TERRAIN",
+            "TERRAIN_DELTA", "TERRAIN_DISPLACEMENT", "TREE", "BUILDING", "ROAD",
+            "AI_DRIVABLE", "VEHICLE", "VEHICLE_FORK", "DYNAMIC_OBJECT", "TRAFFIC_VEHICLE",
+            "PLAYER", "ANIMAL", "ANIMAL_POSITIONING", "ANIMAL_NAV_MESH_BLOCKING",
+            "TRAFFIC_VEHICLE_BLOCKING", "INTERACTABLE_TARGET", "TRIGGER", "FILLABLE", "WATER"
+        }
+
+        local function decodeFlags(bits)
+            local names = {}
+            if CollisionFlag ~= nil then
+                for _, name in ipairs(ALL_FLAG_NAMES) do
+                    local flag = CollisionFlag[name]
+                    if flag ~= nil and bit32.band(bits, flag) ~= 0 then
+                        table.insert(names, name)
+                    end
+                end
+            end
+            return names
+        end
+
+        local groupNames = decodeFlags(group)
+
+        -- Real request: group alone used to be decoded here, mask was
+        -- shown as raw hex with no way to tell what it actually means --
+        -- group is a single "what this node IS" category, mask is "what
+        -- categories this node's collision layer cares about," a whole
+        -- bitfield OR'd together, which is why it reads as a much messier
+        -- hex value. A node like plain TERRAIN typically collides with
+        -- almost every known category except a handful it deliberately
+        -- ignores, so listing what's INCLUDED can be a long, low-signal
+        -- list -- listing what's EXCLUDED (known flags with the bit
+        -- clear) is shorter and more informative for that common case.
+        -- Only meaningful for named flags this list actually knows about,
+        -- not literally "every possible bit" -- an unrecognized/undecoded
+        -- bit doesn't show up in either list.
+        local maskIncluded = decodeFlags(mask or 0)
+        local maskExcluded = {}
         if CollisionFlag ~= nil then
-            for _, name in ipairs({
-                "DEFAULT", "STATIC_OBJECT", "CAMERA_BLOCKING", "GROUND_TIP_BLOCKING",
-                "PLACEMENT_BLOCKING", "AI_BLOCKING", "PRECIPITATION_BLOCKING", "TERRAIN",
-                "TERRAIN_DELTA", "TERRAIN_DISPLACEMENT", "TREE", "BUILDING", "ROAD",
-                "AI_DRIVABLE", "VEHICLE", "VEHICLE_FORK", "DYNAMIC_OBJECT", "TRAFFIC_VEHICLE",
-                "PLAYER", "ANIMAL", "ANIMAL_POSITIONING", "ANIMAL_NAV_MESH_BLOCKING",
-                "TRAFFIC_VEHICLE_BLOCKING", "INTERACTABLE_TARGET", "TRIGGER", "FILLABLE", "WATER"
-            }) do
+            for _, name in ipairs(ALL_FLAG_NAMES) do
                 local flag = CollisionFlag[name]
-                if flag ~= nil and bit32.band(group, flag) ~= 0 then
-                    table.insert(flagNames, name)
+                if flag ~= nil and bit32.band(mask or 0, flag) == 0 then
+                    table.insert(maskExcluded, name)
                 end
             end
         end
-        self:addLine(lines, string.format("Collision: group=0x%X mask=0x%X (%s)", group or 0, mask or 0, #flagNames > 0 and table.concat(flagNames, ", ") or "none"))
+
+        local maskDescription
+        if #maskIncluded == 0 then
+            maskDescription = "none"
+        elseif #maskExcluded < #maskIncluded then
+            maskDescription = "all except: " .. (#maskExcluded > 0 and table.concat(maskExcluded, ", ") or "none")
+        else
+            maskDescription = table.concat(maskIncluded, ", ")
+        end
+
+        self:addLine(lines, string.format("Collision: group=0x%X (%s)", group or 0, #groupNames > 0 and table.concat(groupNames, ", ") or "none"))
+        self:addLine(lines, string.format("Collides with: mask=0x%X (%s)", mask or 0, maskDescription))
+
+        -- Real request: "can I have multiple collisions, so I get a
+        -- 'standing on a road with gravel underneath' answer" -- the
+        -- single group/mask above only ever describes ONE node, whatever
+        -- the raycast's own single closest hit happened to be.
+        -- inspection.collisionStack (WailaTerrainInspector:
+        -- inspectCollisionStack, a real raycastAll probe -- see its own
+        -- comment) is every hit straight down through this point, closest
+        -- first, so a thin road collision shape sitting just above bare
+        -- terrain shows up as its own separate line here instead of only
+        -- ever reporting whichever one raycastClosest happened to prefer.
+        if inspection.collisionStack ~= nil and #inspection.collisionStack > 0 then
+            self:addLine(lines, "Collision stack (closest first):", true, true)
+            for _, entry in ipairs(inspection.collisionStack) do
+                local stackFlagNames = decodeFlags(entry.group or 0)
+                self:addLine(lines, string.format("  %.2fm  %s  group=0x%X (%s)",
+                    entry.distance, WailaUtil.value(entry.nodeName), entry.group or 0,
+                    #stackFlagNames > 0 and table.concat(stackFlagNames, ", ") or "none"))
+            end
+        end
     end
 
     -- Any mod-declared area covering this exact hit point (see
@@ -448,7 +510,7 @@ function WailaHud:draw(inspection, areaSize, areaStep)
     if vehicle == nil then
         local terrain = inspection.terrain
         if terrain ~= nil then
-            self:addLine(lines, string.format("Ground: %s [%s]  field=%s", terrain.materialName, tostring(terrain.materialId), WailaUtil.bool(terrain.isOnField)), true, true)
+            self:addLine(lines, string.format("Ground: %s [%s]  field=%s  structure=%s", terrain.materialName, tostring(terrain.materialId), WailaUtil.bool(terrain.isOnField), WailaUtil.bool(terrain.isClearOfStructures == false)), true, true)
             self:addLine(lines, string.format("Ground type=%s densityBits=%s depth=%s", WailaUtil.value(terrain.groundType), WailaUtil.value(terrain.densityBits), WailaUtil.value(terrain.depth)))
         end
 

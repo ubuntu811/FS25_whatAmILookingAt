@@ -660,12 +660,28 @@ function FS25WhatAmILookingAt:updatePointInspection()
         self.current.terrain = self.terrainInspector:inspectPoint(hit.x, hit.y, hit.z)
         self.current.foliagePoint = self.foliageInspector:inspectPoint(hit.x, hit.z)
         self.current.field = self.fieldInspector:inspectPoint(hit.x, hit.y, hit.z)
+
+        -- Real request: "can I have multiple collisions, so I get a
+        -- 'standing on a road with gravel underneath' answer" -- a real
+        -- raycastAll stack of every hit along the ray, not just the
+        -- single closest one. Gated behind self.enabled, unlike
+        -- terrain/foliagePoint/field above -- this is a heavier probe (up
+        -- to COLLISION_STACK_MAX_HITS raycast hits, each resolving a name
+        -- + collision group), the same "only pay for it when the full
+        -- detailed view actually needs it" reasoning already gating the
+        -- area/foliage scans below self.enabled's own check.
+        if self.enabled then
+            self.current.collisionStack = self.terrainInspector:inspectCollisionStack(hit.x, hit.y, hit.z)
+        else
+            self.current.collisionStack = nil
+        end
     else
         self.current.terrain = nil
         self.current.foliagePoint = nil
         self.current.terrainArea = nil
         self.current.foliageArea = nil
         self.current.field = nil
+        self.current.collisionStack = nil
     end
 end
 

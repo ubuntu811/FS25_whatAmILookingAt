@@ -24,7 +24,7 @@ function WailaTerrain.getMaterialName(materialId)
     return MATERIAL_NAMES[materialId] or string.format("material-%s", tostring(materialId))
 end
 
-function WailaTerrain.new(x, y, z, isOnField, densityBits, groundType, r, g, b, depth, materialId, densityProbe)
+function WailaTerrain.new(x, y, z, isOnField, densityBits, groundType, r, g, b, depth, materialId, densityProbe, isClearOfStructures)
     local self = setmetatable({}, WailaTerrain_mt)
 
     self.x = x
@@ -40,6 +40,7 @@ function WailaTerrain.new(x, y, z, isOnField, densityBits, groundType, r, g, b, 
     self.materialId = materialId
     self.materialName = WailaTerrain.getMaterialName(materialId)
     self.densityProbe = densityProbe
+    self.isClearOfStructures = isClearOfStructures
 
     return self
 end
@@ -59,6 +60,7 @@ function WailaTerrain:toTable()
         materialId = self.materialId,
         materialName = self.materialName,
         densityProbe = self.densityProbe,
+        isClearOfStructures = self.isClearOfStructures,
     }
 end
 
