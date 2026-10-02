@@ -71,6 +71,67 @@ local MATERIAL_DIRT = 1
 local MATERIAL_GRAVEL = 6
 local MATERIAL_STONE = 7
 local TRAIL_MATERIALS = { [MATERIAL_DIRT] = true, [MATERIAL_GRAVEL] = true, [MATERIAL_STONE] = true }
+-- Real request ("split all 3?"): the order the whole-tile scan processes
+-- (and later colors) each material in -- see scanTileCells's own header.
+local SPLIT_MATERIALS = { MATERIAL_DIRT, MATERIAL_GRAVEL, MATERIAL_STONE }
+-- Density-map VALUE each material writes as -- needs >= 2 bits/channels
+-- to represent (0=empty plus 3 real materials), unlike the old single-
+-- material version's plain 1-bit "is this filled" value.
+local MATERIAL_VALUE = { [MATERIAL_DIRT] = 1, [MATERIAL_GRAVEL] = 2, [MATERIAL_STONE] = 3 }
+-- Real request ("so they'd go green instead of white, because forests on
+-- these maps happen to have stone underneath at times"): STONE gets its
+-- own distinct green, separate from dirt/gravel's gray family -- the
+-- whole point of splitting by material at all.
+local MATERIAL_COLOR = {
+    [MATERIAL_DIRT] = { 0.5, 0.5, 0.5 },
+    [MATERIAL_GRAVEL] = { 0.6, 0.55, 0.45 },
+    [MATERIAL_STONE] = { 0.2, 0.5, 0.2 },
+}
+
+-- Real, confirmed live bug (229,673 polygons written in one blocking
+-- call froze the game -- same class of mistake as the earlier whole-map-
+-- scan freeze, see feedback_waila_performance_is_non_negotiable): the
+-- first version of this accumulator was a flat, ever-growing list with
+-- NO dedup at all -- every rescan (whole-map or debug) just appended more
+-- copies of the same ground forever, on top of already being fully
+-- synchronous to write. Real, two-part fix:
+--   1) keyed by REGION (the exact minX/minZ/maxX/maxZ scanTileCells was
+--      called with) so re-scanning the same area REPLACES its entry
+--      instead of duplicating it -- required anyway for the planned
+--      periodic/vehicle-triggered rescans, which by design will
+--      re-touch the same ground repeatedly.
+--   2) stores the RAW (pre-Chaikin) loops, not the smoothed polygons --
+--      3 smoothing iterations at 2 new points/edge inflate point count
+--      ~8x (see SMOOTH_ITERATIONS), and that's what's actually written
+--      to XML/serialized, not just held in memory. Re-smoothed once at
+--      load time instead (see tickLoadFromXML) -- cheap, pure in-memory
+--      vector math, no XML/native cost.
+-- Each savedRegionsByMaterial[materialId] is { [regionKey] = rawLoops }.
+WailaTrailTracer.savedRegionsByMaterial = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} }
+
+-- Real design choice: persists the POLYGON data, not the raw bit-vector
+-- density map itself. Checked for a native "save this bit-vector map to
+-- file" call to mirror loadBitVectorMapFromFile (real, confirmed via the
+-- base game's own FieldGroundSystem loading ITS density maps this way) --
+-- no such call exists in decompiled source. The engine appears to persist
+-- its OWN registered density maps (fruit/foliage/field-ground) at a level
+-- below anything Lua can call into, not something reachable for a map we
+-- created ourselves via createBitVectorMap. Polygon data is also just far
+-- smaller to write/read than a full map dump would be.
+WailaTrailTracer.SAVEGAME_FILENAME = "wailaTrail.xml"
+
+-- Records one scan's freshly-produced RAW (pre-smoothing) polygons under
+-- their region's key, replacing whatever was there before for that exact
+-- region. Called from scanTileCells itself (not each individual caller)
+-- so every present AND future scan path (whole-map ticks, single-tile
+-- debug traces, a future vehicle-triggered local rescan) is captured
+-- automatically, with nothing to remember at each call site.
+function WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, rawPolygonsByMaterial)
+    local regionKey = string.format("%.1f_%.1f_%.1f_%.1f", minX, minZ, maxX, maxZ)
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        WailaTrailTracer.savedRegionsByMaterial[materialId][regionKey] = rawPolygonsByMaterial[materialId] or {}
+    end
+end
 
 -- Real, confirmed live via debug-line visualization: on-field ground
 -- reads as dirt/gravel material too (tillage/crop base layers, IW's own
@@ -88,13 +149,180 @@ local TRAIL_MATERIALS = { [MATERIAL_DIRT] = true, [MATERIAL_GRAVEL] = true, [MAT
 -- uses -- a density-map read, same cost class as the material check
 -- right below, not an expensive raycast, safe to add to this hot path
 -- (confirmed live: up to ~80 calls per tile, hundreds of tiles per scan).
-local function isTrailMaterialAt(x, z)
-    local isOnField = FSDensityMapUtil.getFieldDataAtWorldPosition(x, 0, z)
-    if isOnField then
+-- Real request ("lets try i guess, maybe split all 3?"): returns the
+-- actual matched material id (MATERIAL_DIRT/GRAVEL/STONE) instead of
+-- collapsing it into a boolean -- isTrailMaterialAt below is now just a
+-- thin wrapper over this, same exact behavior for its existing callers
+-- (the production wall-follower), nothing about it changed. The new
+-- grid pipeline (rasterizeRegionByMaterial) uses this directly instead,
+-- to color dirt/gravel/stone regions differently rather than lumping
+-- them into one "is this trail material" signal -- real motivation:
+-- forests on this map often read as STONE underneath, so splitting the
+-- color by material is a free (already-queried) way to visually tell
+-- likely-forest apart from likely-real-trail, without an expensive
+-- per-cell tree raycast.
+-- Real request ("roads are declared in the map data... we could subtract
+-- these to start with"): excludes cells within real-road-ribbon-width of
+-- an actual road spline from ever being classified as trail material at
+-- all -- same "early nil-out" pattern the on-field check below already
+-- uses, done BEFORE tracing rather than trying to untangle a road from a
+-- forest blob after the fact (the real precision problem flagged live:
+-- roads cross/hug forest areas). getTrailMaterialKindAt is the hot path
+-- (potentially millions of calls across a whole-map scan, see
+-- isTrailMaterialAt's own header) so this can't be a naive "check
+-- distance to every road spline point" -- built as a spatial hash
+-- instead (segments bucketed by a coarse grid, NUMERIC keys, not string
+-- concatenation, to avoid GC pressure at this call volume), so a typical
+-- cell (nowhere near any road) hits a couple of empty bucket lookups and
+-- returns immediately; only cells actually near a road pay for real
+-- distance checks, against the handful of segments in their own
+-- neighborhood, never the whole road network.
+local ROAD_EXCLUSION_BUCKET_SIZE = 32.0
+local ROAD_EXCLUSION_MARGIN = 2.0
+local ROAD_EXCLUSION_SAMPLE_STEP = 8.0
+local roadExclusionBuckets = nil
+
+local function addRoadExclusionSegment(buckets, x1, z1, x2, z2)
+    local minCol = math.floor(math.min(x1, x2) / ROAD_EXCLUSION_BUCKET_SIZE)
+    local maxCol = math.floor(math.max(x1, x2) / ROAD_EXCLUSION_BUCKET_SIZE)
+    local minRow = math.floor(math.min(z1, z2) / ROAD_EXCLUSION_BUCKET_SIZE)
+    local maxRow = math.floor(math.max(z1, z2) / ROAD_EXCLUSION_BUCKET_SIZE)
+    for col = minCol, maxCol do
+        local colBucket = buckets[col]
+        if colBucket == nil then
+            colBucket = {}
+            buckets[col] = colBucket
+        end
+        for row = minRow, maxRow do
+            local cellBucket = colBucket[row]
+            if cellBucket == nil then
+                cellBucket = {}
+                colBucket[row] = cellBucket
+            end
+            table.insert(cellBucket, { x1, z1, x2, z2 })
+        end
+    end
+end
+
+-- Real, one-time (per session) cost -- roads are static map data, never
+-- change mid-session, so this builds once, lazily, on first use, and is
+-- cached forever after. Same real getSplineLength/getSplinePosition
+-- sampling sampleSplineChain (below, for the road overlay) already
+-- uses -- kept separate rather than shared, since this needs plain
+-- segments for the spatial hash, not a full point chain.
+local function buildRoadExclusionBuckets()
+    local buckets = {}
+    if g_currentMission == nil or g_currentMission.aiSystem == nil then
+        return buckets
+    end
+    local splines = g_currentMission.aiSystem:getRoadSplines()
+    for spline in pairs(splines) do
+        local length = getSplineLength(spline)
+        if length ~= nil and length > 0 then
+            local stepSize = ROAD_EXCLUSION_SAMPLE_STEP / length
+            local prevX, prevZ = nil, nil
+            for t = 0, 1 + stepSize, stepSize do
+                local clampedT = math.clamp(t, 0, 1)
+                local x, _, z = getSplinePosition(spline, clampedT)
+                if prevX ~= nil then
+                    addRoadExclusionSegment(buckets, prevX, prevZ, x, z)
+                end
+                prevX, prevZ = x, z
+            end
+        end
+    end
+    return buckets
+end
+
+local function distancePointToSegmentSq(px, pz, x1, z1, x2, z2)
+    local dx, dz = x2 - x1, z2 - z1
+    local lengthSq = dx * dx + dz * dz
+    if lengthSq < 0.0001 then
+        local ddx, ddz = px - x1, pz - z1
+        return ddx * ddx + ddz * ddz
+    end
+    local t = math.clamp(((px - x1) * dx + (pz - z1) * dz) / lengthSq, 0, 1)
+    local closestX, closestZ = x1 + t * dx, z1 + t * dz
+    local ddx, ddz = px - closestX, pz - closestZ
+    return ddx * ddx + ddz * ddz
+end
+
+local function isNearRealRoad(x, z)
+    if roadExclusionBuckets == nil then
+        roadExclusionBuckets = buildRoadExclusionBuckets()
+    end
+    local col = math.floor(x / ROAD_EXCLUSION_BUCKET_SIZE)
+    local row = math.floor(z / ROAD_EXCLUSION_BUCKET_SIZE)
+    local thresholdSq = (WailaTrailTracer.ROAD_SPLINE_RIBBON_WIDTH * 0.5 + ROAD_EXCLUSION_MARGIN) ^ 2
+    for dCol = -1, 1 do
+        local colBucket = roadExclusionBuckets[col + dCol]
+        if colBucket ~= nil then
+            for dRow = -1, 1 do
+                local cellBucket = colBucket[row + dRow]
+                if cellBucket ~= nil then
+                    for _, segment in ipairs(cellBucket) do
+                        if distancePointToSegmentSq(x, z, segment[1], segment[2], segment[3], segment[4]) <= thresholdSq then
+                            return true
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- Real integration ("how can that forest algorithm be integrated into
+-- the scan whole map mode... forest areas / map declared roads on top /
+-- rest of the map scanned the old way"): per-CHUNK forest lookup,
+-- populated by tickWholeMapScan (see there) before the detailed 1m
+-- material scan runs for that chunk, so the expensive detailed trace
+-- never has to touch ground already classified as forest at the coarse
+-- level. getTrailMaterialKindAt only ever READS this -- it has no idea
+-- how forest cells get classified, same separation of concerns the
+-- road-exclusion check above already has. nil grid (outside an active
+-- whole-map scan, e.g. the single-tile debug tool) just means "no forest
+-- data available," never excludes anything -- this is additive, not a
+-- behavior change for any caller that doesn't populate it.
+local currentChunkForestGrid = nil
+local currentChunkForestOriginX = nil
+local currentChunkForestOriginZ = nil
+local currentChunkForestCellSize = nil
+local currentChunkForestSize = nil
+
+local function isInCurrentChunkForest(x, z)
+    if currentChunkForestGrid == nil then
         return false
     end
+    local col = math.floor((x - currentChunkForestOriginX) / currentChunkForestCellSize)
+    local row = math.floor((z - currentChunkForestOriginZ) / currentChunkForestCellSize)
+    if col < 0 or col >= currentChunkForestSize or row < 0 or row >= currentChunkForestSize then
+        return false
+    end
+    local gridRow = currentChunkForestGrid[row]
+    return gridRow ~= nil and gridRow[col] == true
+end
+
+local function getTrailMaterialKindAt(x, z)
+    local isOnField = FSDensityMapUtil.getFieldDataAtWorldPosition(x, 0, z)
+    if isOnField then
+        return nil
+    end
+    if isNearRealRoad(x, z) then
+        return nil
+    end
+    if isInCurrentChunkForest(x, z) then
+        return nil
+    end
     local _, _, _, _, materialId = getTerrainAttributesAtWorldPos(g_terrainNode, x, 0, z, true, true, true, true, false)
-    return TRAIL_MATERIALS[materialId] == true
+    if TRAIL_MATERIALS[materialId] == true then
+        return materialId
+    end
+    return nil
+end
+
+local function isTrailMaterialAt(x, z)
+    return getTrailMaterialKindAt(x, z) ~= nil
 end
 
 -- Real, proven pattern ported from FS25_ImmersiveWeathering's own
@@ -1717,6 +1945,12 @@ WailaTrailTracer.GRID_CELL_SIZE = 1.0
 -- settings), giving ~2m/texel on this map instead of 16m.
 WailaTrailTracer.OVERLAY_RESOLUTION = 2048
 
+-- Real request ("split all 3?"): the persistent overlay's own bit-vector
+-- map now stores one of 4 values per cell (0=empty, 1=dirt, 2=gravel,
+-- 3=stone -- see MATERIAL_VALUE), not a plain 1-bit "is this filled" --
+-- needs 2 channels (2 bits, values 0-3) to represent that, not 1.
+WailaTrailTracer.OVERLAY_NUM_CHANNELS = 2
+
 -- Clockwise from north, matching standard Moore-neighbor tracing
 -- convention. Index 1=N, 2=NE, 3=E, 4=SE, 5=S, 6=SW, 7=W, 8=NW.
 local MOORE_DIRECTIONS = {
@@ -1761,6 +1995,47 @@ local function rasterizeRegion(minX, minZ, maxX, maxZ, cellSize, isBlockedFn)
         grid[row] = gridRow
     end
     return grid, minX, minZ, size
+end
+
+-- Real request ("split all 3?"): same shape as rasterizeRegion above,
+-- but stores the MATCHED MATERIAL ID per cell (nil for no match)
+-- instead of collapsing it to a boolean -- one real terrain-query pass
+-- per cell, not three, so splitting by material doesn't triple the
+-- dominant per-chunk cost this session already spent effort reducing.
+-- filterGridByMaterial below derives each material's own boolean
+-- sub-grid from this in memory, for free.
+local function rasterizeRegionMaterials(minX, minZ, maxX, maxZ, cellSize, isBlockedFn)
+    local size = math.ceil((maxX - minX) / cellSize)
+    local grid = {}
+    for row = 0, size - 1 do
+        local gridRow = {}
+        for col = 0, size - 1 do
+            local worldX = minX + (col + 0.5) * cellSize
+            local worldZ = minZ + (row + 0.5) * cellSize
+            local materialId = getTrailMaterialKindAt(worldX, worldZ)
+            if materialId ~= nil and isBlockedFn ~= nil and isBlockedFn(worldX, worldZ) then
+                materialId = nil
+            end
+            gridRow[col] = materialId
+        end
+        grid[row] = gridRow
+    end
+    return grid, minX, minZ, size
+end
+
+-- A plain boolean grid (same isFilledCell-compatible shape every other
+-- grid in this file already uses), true only where the material grid
+-- above matched this specific materialId.
+local function filterGridByMaterial(materialGrid, size, materialId)
+    local grid = {}
+    for row = 0, size - 1 do
+        local gridRow = {}
+        for col = 0, size - 1 do
+            gridRow[col] = materialGrid[row][col] == materialId
+        end
+        grid[row] = gridRow
+    end
+    return grid
 end
 
 -- Out-of-grid cells read as unfilled -- the grid's own edge acts as an
@@ -2220,19 +2495,71 @@ end
 -- visual mismatch is a real coordinate bug or just a side effect of one
 -- of those later steps -- exactly the ambiguity that made the "offset?"
 -- and "74,640-cell region" screenshots hard to diagnose.
+--
+-- Real request ("split all 3?"): one real terrain-query rasterize pass
+-- (rasterizeRegionMaterials -- NOT three, see its own header), then the
+-- rest of the pipeline (collectBorderSegments/chainBorderLoops/
+-- smoothClosedLoop, all unchanged) runs independently per material
+-- against a cheap derived boolean sub-grid. result.polygonsByMaterial
+-- is now the real deliverable -- one polygon list per material id, so
+-- dirt/gravel/stone can be colored differently instead of lumped into
+-- one "is this trail material" blob (real motivation: this map's
+-- forests often read as plain STONE underneath).
 function WailaTrailTracer.scanTileCells(minX, minZ, maxX, maxZ, cellSize)
     cellSize = cellSize or WailaTrailTracer.GRID_CELL_SIZE
-    local grid, originX, originZ, size = rasterizeRegion(minX, minZ, maxX, maxZ, cellSize)
-    local result = collectBorderSegments(grid, originX, originZ, size, cellSize)
-    -- "Step 2," real request: chain the border segments above into
-    -- closed loops, then smooth each one (see chainBorderLoops and
-    -- smoothClosedLoop's own headers). result.polygons is the real
-    -- deliverable -- an actually-closed polygon per connected region,
-    -- with no tracing/simplify-tolerance fragility in it.
-    result.polygons = {}
-    for _, loop in ipairs(WailaTrailTracer.chainBorderLoops(result.segments)) do
-        table.insert(result.polygons, WailaTrailTracer.smoothClosedLoop(loop))
+    local materialGrid, originX, originZ, size = rasterizeRegionMaterials(minX, minZ, maxX, maxZ, cellSize)
+
+    local result = {
+        cellCount = 0,
+        touchesTileEdge = false,
+        truncated = false,
+        segments = {},
+        polygonsByMaterial = {},
+    }
+    -- Raw (pre-Chaikin) loops per material, kept alongside the smoothed
+    -- polygons purely for recordScannedPolygons -- see its own header for
+    -- why persistence wants the raw, un-inflated point count instead.
+    local rawPolygonsByMaterial = {}
+
+    -- Real request ("300k little shapes... maybe simplify the
+    -- structures"): closeGrid (dilate then erode -- already built,
+    -- previously never wired into this pipeline at all, see its own
+    -- header) merges nearby disconnected fragments -- exactly what's
+    -- fragmenting forest floor into tens of thousands of tiny STONE blobs
+    -- -- into far fewer, larger contiguous regions before tracing, which
+    -- is what actually drives the 229k polygon count down, not a
+    -- resolution or rendering change. Real, explicit cost warning, not
+    -- assumed fine: erodeGrid/dilateGrid are each O(size^2 * window^2)
+    -- per call, now run per-material per-chunk -- radius 1 (not
+    -- GAP_TOLERANCE's full 2.0m/2-cell value) specifically to keep that
+    -- bounded; even so this needs a real timed whole-map run to confirm
+    -- it didn't meaningfully slow the scan down, not just assumed safe
+    -- because the individual function was already written.
+    local CLOSE_RADIUS_CELLS = 1
+
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        local grid = filterGridByMaterial(materialGrid, size, materialId)
+        grid = closeGrid(grid, size, CLOSE_RADIUS_CELLS)
+        local materialResult = collectBorderSegments(grid, originX, originZ, size, cellSize)
+
+        result.cellCount = result.cellCount + materialResult.cellCount
+        result.touchesTileEdge = result.touchesTileEdge or materialResult.touchesTileEdge
+        result.truncated = result.truncated or materialResult.truncated
+        for _, segment in ipairs(materialResult.segments) do
+            table.insert(result.segments, segment)
+        end
+
+        local rawLoops = WailaTrailTracer.chainBorderLoops(materialResult.segments)
+        local polygons = {}
+        for _, loop in ipairs(rawLoops) do
+            table.insert(polygons, WailaTrailTracer.smoothClosedLoop(loop))
+        end
+        result.polygonsByMaterial[materialId] = polygons
+        rawPolygonsByMaterial[materialId] = rawLoops
     end
+
+    WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, rawPolygonsByMaterial)
+
     return result
 end
 
@@ -2305,12 +2632,32 @@ end
 -- Same polygon-fill switch as testDensityMapWrite above -- see that
 -- function's own header for why. Same OVERLAY_RESOLUTION fix too (used
 -- to size this to the tile's own cell count, which is wrong -- see that
--- constant's own comment).
-function WailaTrailTracer.buildTestOverlay(polygons)
+-- constant's own comment). Real request ("split all 3?"): takes
+-- polygonsByMaterial (scanTileCells' own field) now, not a flat list --
+-- each material writes its own MATERIAL_VALUE and gets its own
+-- MATERIAL_COLOR, all baked into the one persistent overlay together.
+-- Real request ("i see the overlay in the minimap constantly flash on/
+-- off... it's useless"): resetDensityMapVisualizationOverlay +
+-- generateDensityMapVisualizationOverlay was running on EVERY call to
+-- this function -- once per chunk during a whole-map scan, i.e.
+-- potentially every single frame -- and that regenerate is not
+-- instantaneous (matches this file's own logs already showing
+-- "notReady"/"rendering" alternating rapidly during active scans, never
+-- investigated as a visual problem until now). The underlying DATA
+-- (the DensityMapModifier writes) is cheap and always current regardless
+-- -- only the TEXTURE regenerate needs throttling. forceRegenerate lets
+-- tickWholeMapScan's own completion always get one final regenerate,
+-- even if it lands inside the throttle window, so the last few scanned
+-- chunks aren't missing from what's actually shown.
+WailaTrailTracer.OVERLAY_REGENERATE_INTERVAL_SEC = 0.3
+WailaTrailTracer.lastOverlayRegenerateTime = nil
+
+function WailaTrailTracer.buildTestOverlay(polygonsByMaterial, forceRegenerate)
     local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    local numChannels = WailaTrailTracer.OVERLAY_NUM_CHANNELS
     if WailaTrailTracer.testOverlayMap == nil then
         WailaTrailTracer.testOverlayMap = createBitVectorMap("wailaTrailOverlayTestMap")
-        loadBitVectorMapNew(WailaTrailTracer.testOverlayMap, size, size, 1, false)
+        loadBitVectorMapNew(WailaTrailTracer.testOverlayMap, size, size, numChannels, false)
         WailaTrailTracer.testOverlay = createDensityMapVisualizationOverlay("wailaTrailOverlayTest", size, size)
     end
 
@@ -2324,26 +2671,51 @@ function WailaTrailTracer.buildTestOverlay(polygons)
     -- Deliberately never reset here -- the map is only ever allocated
     -- once, above, and every debug press just adds to it.
     local map = WailaTrailTracer.testOverlayMap
-    local modifier = DensityMapModifier.new(map, 0, 1, g_terrainNode)
+    local modifier = DensityMapModifier.new(map, 0, numChannels, g_terrainNode)
 
-    for _, polygon in ipairs(polygons) do
-        modifier:clearPolygonPoints()
-        for _, point in ipairs(polygon) do
-            modifier:addPolygonPointWorldCoords(point[1], point[2])
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        local value = MATERIAL_VALUE[materialId]
+        for _, polygon in ipairs(polygonsByMaterial[materialId] or {}) do
+            modifier:clearPolygonPoints()
+            for _, point in ipairs(polygon) do
+                modifier:addPolygonPointWorldCoords(point[1], point[2])
+            end
+            modifier:executeSet(value)
         end
-        modifier:executeSet(1)
     end
+
+    local now = getTimeSec()
+    if not forceRegenerate and WailaTrailTracer.lastOverlayRegenerateTime ~= nil
+        and now - WailaTrailTracer.lastOverlayRegenerateTime < WailaTrailTracer.OVERLAY_REGENERATE_INTERVAL_SEC then
+        return
+    end
+    WailaTrailTracer.lastOverlayRegenerateTime = now
 
     -- (overlay, mapId, filterMapId, filterMask, firstChannel,
     -- numChannels, value, r, g, b) -- confirmed live against
     -- MapOverlayGenerator:buildFieldMapOverlay's own call shape. No
     -- filter map needed (filterMapId=0, filterMask=0), same "no filter"
-    -- pattern that function uses too.
+    -- pattern that function uses too. One call per material now, each
+    -- with its own MATERIAL_VALUE and MATERIAL_COLOR.
     resetDensityMapVisualizationOverlay(WailaTrailTracer.testOverlay)
-    -- Real request: "turn this gray" -- cyan was just a loud, easy-to-spot
-    -- test color, not a final choice.
-    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.testOverlay, map, 0, 0, 0, 1, 1, 0.5, 0.5, 0.5)
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        local color = MATERIAL_COLOR[materialId]
+        setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.testOverlay, map, 0, 0, 0, numChannels, MATERIAL_VALUE[materialId], color[1], color[2], color[3])
+    end
     generateDensityMapVisualizationOverlay(WailaTrailTracer.testOverlay)
+end
+
+-- Flattens scanTileCells' own polygonsByMaterial back into one plain
+-- list, for the callers that don't care which material a shape came
+-- from (TaskMap's own debug-line drawing, the write-speed timing test).
+local function flattenPolygonsByMaterial(polygonsByMaterial)
+    local flat = {}
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        for _, polygon in ipairs(polygonsByMaterial[materialId] or {}) do
+            table.insert(flat, polygon)
+        end
+    end
+    return flat
 end
 
 function WailaTrailTracer.debugTraceAt(x, z)
@@ -2363,7 +2735,11 @@ function WailaTrailTracer.debugTraceAt(x, z)
     result.cellCount = scan.cellCount
     result.touchesTileEdge = scan.touchesTileEdge
     result.truncated = scan.truncated
-    result.polygons = scan.polygons
+    -- Real fix ("split all 3?"): scan.polygonsByMaterial is grouped by
+    -- material now, not one flat list -- result.polygons stays flat
+    -- (flattenPolygonsByMaterial) purely for TaskMap's own debug-line
+    -- drawing, which doesn't care which material a shape came from.
+    result.polygons = flattenPolygonsByMaterial(scan.polygonsByMaterial)
 
     -- Real fix: testDensityMapWrite/buildTestOverlay used to each
     -- independently re-rasterize the same tile from scratch (a second,
@@ -2375,13 +2751,16 @@ function WailaTrailTracer.debugTraceAt(x, z)
     -- Real request ("let's just test it"): run the density-map write
     -- benchmark on the same tile every debug press, log-only for now --
     -- nothing rendered from this yet, this is purely "is it fast enough
-    -- to be worth building on."
-    result.densityWritePolygonCount, result.densityWriteMs = WailaTrailTracer.testDensityMapWrite(scan.polygons)
+    -- to be worth building on." Timing doesn't care which material a
+    -- polygon came from, so this still takes the flat list.
+    result.densityWritePolygonCount, result.densityWriteMs = WailaTrailTracer.testDensityMapWrite(result.polygons)
 
     -- "Test 2": also bake the same tile into the persistent overlay
     -- texture -- TaskMap renders WailaTrailTracer.testOverlay directly
-    -- once it's ready, not through this result table.
-    WailaTrailTracer.buildTestOverlay(scan.polygons)
+    -- once it's ready, not through this result table. This one DOES
+    -- need the material grouping (for per-material color), so it gets
+    -- scan.polygonsByMaterial directly, not the flattened list.
+    WailaTrailTracer.buildTestOverlay(scan.polygonsByMaterial)
 
     return result
 end
@@ -2417,8 +2796,700 @@ end
 -- (4,096 total chunks for this 4096m map, vs 256 tiles before), same
 -- "worth revisiting once seen live" footing as this file's other first
 -- guesses.
+-- Real request ("prove to me you can write splines to the minimap"):
+-- grabs the REAL road network (g_currentMission.aiSystem:getRoadSplines(),
+-- confirmed real via decompile of AISystem.lua/TrafficSystem.lua -- not
+-- our own detected material blobs) and bakes it into its OWN, separate
+-- overlay -- deliberately isolated from WailaTrailTracer's detected-trail
+-- overlay (testOverlayMap/testOverlay), not mixed into the same channel,
+-- since a later step wants to "dedup" the two layers against each other
+-- and that's only possible if they stay two clean, independent things
+-- until then. Using known-good, always-correctly-positioned real road
+-- geometry as the input also isolates the actual open question (does our
+-- OVERLAY RENDERING reach the minimap at all) from "is our own detection
+-- producing garbage" -- if real roads don't show on the minimap either,
+-- that's decisive proof this is a rendering-reachability problem, not a
+-- data-quality one.
+WailaTrailTracer.ROAD_SPLINE_SAMPLE_STEP = 4.0
+WailaTrailTracer.ROAD_SPLINE_RIBBON_WIDTH = 10.0
+
+-- Samples a real spline node into a flat {x,z} chain every stepMeters of
+-- real spline length -- same getSplineLength/getSplinePosition(spline, t)
+-- calls the base game's own TrafficSystem:validateSplines() already uses
+-- (confirmed via decompile), just a coarser, fixed-meter step (that
+-- function uses ~1m for collision validation; we only need enough points
+-- to look like a smooth road on a map, not sub-meter precision).
+local function sampleSplineChain(spline, stepMeters)
+    local length = getSplineLength(spline)
+    if length == nil or length <= 0 then
+        return nil
+    end
+    local stepSize = stepMeters / length
+    local chain = {}
+    for t = 0, 1 + stepSize, stepSize do
+        local clampedT = math.clamp(t, 0, 1)
+        local x, _, z = getSplinePosition(spline, clampedT)
+        table.insert(chain, { x, z })
+    end
+    return chain
+end
+
+-- Turns a centerline chain into a filled ribbon polygon via
+-- WailaTrailTracer.offsetChain (already built for the original,
+-- abandoned path-tracer -- the RIBBON MATH was never the fragile part of
+-- that approach, only inferring centerlines FROM scan noise was; reusing
+-- it here on a real, already-correct spline input is a different, much
+-- safer use of the same function). Open-ring shape (left side, then the
+-- right side reversed), matching every other polygon convention already
+-- used by this file's DensityMapModifier writes -- no duplicated closing
+-- point.
+local function buildRibbonPolygon(chain, width)
+    local halfWidth = width * 0.5
+    local left = WailaTrailTracer.offsetChain(chain, halfWidth)
+    local right = WailaTrailTracer.offsetChain(chain, -halfWidth)
+    local polygon = {}
+    for _, point in ipairs(left) do
+        table.insert(polygon, point)
+    end
+    for i = #right, 1, -1 do
+        table.insert(polygon, right[i])
+    end
+    return polygon
+end
+
+-- Public: one-shot bake (real roads are static -- no incremental
+-- ticking needed the way the trail scan needs). Real roads only, own
+-- bit-vector map/overlay (wailaRoadOverlayMap/wailaRoadOverlay), own
+-- bright color so it's visually unmistakable from the trail overlay's
+-- gray/green palette. Returns (true, splineCount, polygonCount) or
+-- (false, reason), same shape every other WAILA debug/status function in
+-- this codebase already uses.
+function WailaTrailTracer.buildRoadSplineOverlay()
+    if g_currentMission == nil or g_currentMission.aiSystem == nil then
+        log("buildRoadSplineOverlay: g_currentMission.aiSystem not available yet")
+        return false, "aiSystem not ready"
+    end
+
+    local splines = g_currentMission.aiSystem:getRoadSplines()
+    local splineCount = table.size(splines)
+    if splineCount == 0 then
+        log("buildRoadSplineOverlay: no road splines found")
+        return false, "no road splines found"
+    end
+
+    local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    if WailaTrailTracer.roadOverlayMap == nil then
+        WailaTrailTracer.roadOverlayMap = createBitVectorMap("wailaRoadOverlayMap")
+        loadBitVectorMapNew(WailaTrailTracer.roadOverlayMap, size, size, 1, false)
+        WailaTrailTracer.roadOverlay = createDensityMapVisualizationOverlay("wailaRoadOverlay", size, size)
+    end
+
+    local map = WailaTrailTracer.roadOverlayMap
+    local modifier = DensityMapModifier.new(map, 0, 1, g_terrainNode)
+
+    local startTime = getTimeSec()
+    local polygonCount = 0
+    for spline in pairs(splines) do
+        local chain = sampleSplineChain(spline, WailaTrailTracer.ROAD_SPLINE_SAMPLE_STEP)
+        if chain ~= nil and #chain >= 2 then
+            local ribbon = buildRibbonPolygon(chain, WailaTrailTracer.ROAD_SPLINE_RIBBON_WIDTH)
+            modifier:clearPolygonPoints()
+            for _, point in ipairs(ribbon) do
+                modifier:addPolygonPointWorldCoords(point[1], point[2])
+            end
+            modifier:executeSet(1)
+            polygonCount = polygonCount + 1
+        end
+    end
+
+    -- Real request ("draw your 'map declared roads' like dark gray
+    -- instead of green, so i see we got the right ones"): dark gray
+    -- reads as "real road" at a glance, matching real-world road-color
+    -- intuition, so it's easy to eyeball-verify this matches the actual
+    -- visible roads on the map -- still distinct from the trail
+    -- overlay's gray/tan/green and the forest overlay's saturated green.
+    resetDensityMapVisualizationOverlay(WailaTrailTracer.roadOverlay)
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.roadOverlay, map, 0, 0, 0, 1, 1, 0.25, 0.25, 0.25)
+    generateDensityMapVisualizationOverlay(WailaTrailTracer.roadOverlay)
+
+    local elapsedMs = (getTimeSec() - startTime) * 1000
+    log("buildRoadSplineOverlay: %d spline(s) found, %d ribbon polygon(s) written in %.0fms", splineCount, polygonCount, elapsedMs)
+
+    return true, splineCount, polygonCount
+end
+
+-- Real request ("a scanner that sees where trees are is valuable input
+-- for IW's replant feature too... go ahead, make sure both are drawn in
+-- distinct colors"): CollisionFlag.TREE (bit 11, "A tree") and
+-- CollisionFlag.WATER (bit 31, "A water plane") are both real, confirmed
+-- collision flags (decompiled CollisionFlag.lua directly) -- same family
+-- as CollisionFlag.ROAD/BUILDING this file's own isSpotClearOfStructures
+-- already raycasts against, just never asked WHICH flag matched before,
+-- only "is anything here at all". One raycast per point (combined
+-- TREE|WATER mask), then CollisionFlag.getHasGroupFlagSet on the hit to
+-- tell which one it actually was -- not two separate raycasts, same
+-- "don't multiply the expensive part" reasoning rasterizeRegionMaterials
+-- already applies to terrain queries. Deliberately its own separate
+-- probe, NOT wired into isTrailMaterialAt (the hot per-cell path) --
+-- same reasoning isSpotClearOfStructures' own header already gives for
+-- why a raycast belongs nowhere near that call volume.
+local FEATURE_COLLISION_MASK = bit32.bor(CollisionFlag.TREE, CollisionFlag.WATER)
+local featureRaycastTarget = {}
+function featureRaycastTarget:onFeatureRaycastCallback(hitObjectId)
+    if hitObjectId ~= nil and hitObjectId ~= 0 then
+        self.hit = hitObjectId
+    end
+    return false
+end
+
+-- Returns "TREE", "WATER", or nil. Raycast starts well above typical
+-- tree canopy height (real trees can be tens of meters tall, unlike the
+-- structure check's +3/-3m window which only needs to clear low
+-- buildings/vehicles) and travels down through it -- relies on canopy
+-- geometry having no real collision (a standard perf optimization,
+-- collision usually lives on the trunk only), same assumption any
+-- forestry-adjacent raycast in this game already has to make.
+local function classifyGroundFeatureAt(x, z)
+    local terrainHeight = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z)
+    featureRaycastTarget.hit = nil
+    raycastClosest(x, terrainHeight + 40, z, 0, -1, 0, 45, "onFeatureRaycastCallback", featureRaycastTarget, FEATURE_COLLISION_MASK)
+    if featureRaycastTarget.hit == nil then
+        return nil
+    end
+    if CollisionFlag.getHasGroupFlagSet(featureRaycastTarget.hit, CollisionFlag.TREE) then
+        return "TREE"
+    end
+    if CollisionFlag.getHasGroupFlagSet(featureRaycastTarget.hit, CollisionFlag.WATER) then
+        return "WATER"
+    end
+    return nil
+end
+
+-- Deliberately coarse -- this isn't tracing a precise material boundary
+-- (that's what the 1m trail scan is for), just "is there forest/water
+-- roughly here", so a much bigger cell is the right tradeoff: raycasts
+-- are real per-call cost, unlike the pure density-map reads the material
+-- scan uses.
+WailaTrailTracer.FEATURE_SCAN_CELL_SIZE = 8.0
+
+local FEATURE_TREE = 1
+local FEATURE_WATER = 2
+local FEATURE_COLOR = {
+    [FEATURE_TREE] = { 0.05, 0.35, 0.05 },
+    [FEATURE_WATER] = { 0.15, 0.35, 0.85 },
+}
+
+-- Same grid shape as rasterizeRegion/rasterizeRegionMaterials, but
+-- driven by classifyGroundFeatureAt instead of a terrain-material read --
+-- kept as its own function rather than generalizing those two, since
+-- they're the hot path and don't need the extra indirection cost.
+local function rasterizeFeatureRegion(minX, minZ, maxX, maxZ, cellSize)
+    local size = math.ceil((maxX - minX) / cellSize)
+    local treeGrid, waterGrid = {}, {}
+    for row = 0, size - 1 do
+        local treeRow, waterRow = {}, {}
+        for col = 0, size - 1 do
+            local worldX = minX + (col + 0.5) * cellSize
+            local worldZ = minZ + (row + 0.5) * cellSize
+            local feature = classifyGroundFeatureAt(worldX, worldZ)
+            treeRow[col] = feature == "TREE"
+            waterRow[col] = feature == "WATER"
+        end
+        treeGrid[row] = treeRow
+        waterGrid[row] = waterRow
+    end
+    return treeGrid, waterGrid, minX, minZ, size
+end
+
+-- Public: one debug-tile-sized area around (x, z) (same DEBUG_TILE_SIZE
+-- footprint the single-press material debug tool uses, see
+-- getTileBounds), scanned once, synchronously -- a real cost measurement
+-- first (this logs cells/elapsed/ms-per-cell), same "measure the small
+-- case before committing to a whole-map incremental scanner" discipline
+-- the original material scan followed too. Reuses collectBorderSegments/
+-- chainBorderLoops/smoothClosedLoop completely unchanged -- those only
+-- ever cared about a plain boolean grid, never about what a cell being
+-- "filled" actually means, so tree/water shapes come out through the
+-- exact same, already-proven boundary tracer as the material scan.
+function WailaTrailTracer.buildFeatureOverlay(x, z)
+    local minX, minZ, maxX, maxZ = WailaTrailTracer.getTileBounds(x, z)
+    local cellSize = WailaTrailTracer.FEATURE_SCAN_CELL_SIZE
+
+    local startTime = getTimeSec()
+    local treeGrid, waterGrid, originX, originZ, size = rasterizeFeatureRegion(minX, minZ, maxX, maxZ, cellSize)
+
+    local treeResult = collectBorderSegments(treeGrid, originX, originZ, size, cellSize)
+    local waterResult = collectBorderSegments(waterGrid, originX, originZ, size, cellSize)
+
+    local treePolygons = {}
+    for _, loop in ipairs(WailaTrailTracer.chainBorderLoops(treeResult.segments)) do
+        table.insert(treePolygons, WailaTrailTracer.smoothClosedLoop(loop))
+    end
+    local waterPolygons = {}
+    for _, loop in ipairs(WailaTrailTracer.chainBorderLoops(waterResult.segments)) do
+        table.insert(waterPolygons, WailaTrailTracer.smoothClosedLoop(loop))
+    end
+
+    local overlaySize = WailaTrailTracer.OVERLAY_RESOLUTION
+    if WailaTrailTracer.featureOverlayMap == nil then
+        WailaTrailTracer.featureOverlayMap = createBitVectorMap("wailaFeatureOverlayMap")
+        loadBitVectorMapNew(WailaTrailTracer.featureOverlayMap, overlaySize, overlaySize, 2, false)
+        WailaTrailTracer.featureOverlay = createDensityMapVisualizationOverlay("wailaFeatureOverlay", overlaySize, overlaySize)
+    end
+
+    local map = WailaTrailTracer.featureOverlayMap
+    local modifier = DensityMapModifier.new(map, 0, 2, g_terrainNode)
+
+    for _, polygon in ipairs(treePolygons) do
+        modifier:clearPolygonPoints()
+        for _, point in ipairs(polygon) do
+            modifier:addPolygonPointWorldCoords(point[1], point[2])
+        end
+        modifier:executeSet(FEATURE_TREE)
+    end
+    for _, polygon in ipairs(waterPolygons) do
+        modifier:clearPolygonPoints()
+        for _, point in ipairs(polygon) do
+            modifier:addPolygonPointWorldCoords(point[1], point[2])
+        end
+        modifier:executeSet(FEATURE_WATER)
+    end
+
+    -- Dark forest green vs a saturated blue -- deliberately distinct from
+    -- both the trail overlay's gray/tan/green AND the road overlay's
+    -- yellow, so all three layers stay visually unambiguous stacked on
+    -- the same map.
+    resetDensityMapVisualizationOverlay(WailaTrailTracer.featureOverlay)
+    local treeColor = FEATURE_COLOR[FEATURE_TREE]
+    local waterColor = FEATURE_COLOR[FEATURE_WATER]
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.featureOverlay, map, 0, 0, 0, 2, FEATURE_TREE, treeColor[1], treeColor[2], treeColor[3])
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.featureOverlay, map, 0, 0, 0, 2, FEATURE_WATER, waterColor[1], waterColor[2], waterColor[3])
+    generateDensityMapVisualizationOverlay(WailaTrailTracer.featureOverlay)
+
+    local elapsedMs = (getTimeSec() - startTime) * 1000
+    local cellCount = size * size
+    log("buildFeatureOverlay: %dx%d cells (%.0fm each), %d tree polygon(s), %d water polygon(s), %.0fms total (%.3fms/cell)",
+        size, size, cellSize, #treePolygons, #waterPolygons, elapsedMs, elapsedMs / cellCount)
+
+    return true, cellCount, #treePolygons, #waterPolygons, elapsedMs
+end
+
+-- Real request ("classify space first, then construct new geometry" --
+-- forwarded from a ChatGPT design discussion, "go ahead with the
+-- forests"): a genuinely different classifier from everything else in
+-- this file -- not material ID, not a raycast, pure STATISTICS over
+-- several density-map reads per coarse cell. The insight: forest floor
+-- isn't "the wrong material," it's "several DIFFERENT materials mixed
+-- together in the same small area" (confirmed live via ground-level
+-- screenshot -- real, deliberate map art, dirt/stone/gravel deliberately
+-- sprinkled together), which a field or a real gravel patch never is
+-- (one material, overwhelmingly dominant). Sample several points per
+-- cell, count how many DISTINCT trail materials show up and whether any
+-- one of them dominates -- "high diversity, no clear winner" is the
+-- forest signature; "one material, everything else near zero" is a real
+-- uniform surface (field, real road, real gravel patch, etc).
+-- Deliberately scoped to ONE debug tile (getTileBounds, same as the
+-- production material debug tool) -- a real test of the hypothesis
+-- before committing to rewriting anything at whole-map scale, same
+-- "prove the small case first" discipline the original material scan
+-- itself followed.
+WailaTrailTracer.FOREST_CELL_SIZE = 16.0
+WailaTrailTracer.FOREST_SAMPLES_PER_AXIS = 3
+-- Real, confirmed live regression: this was tightened to 3 (all of
+-- dirt/gravel/stone) to suppress isolated false-positive blobs, but with
+-- only 9 samples per 16m cell, real forest almost never shows all three
+-- -- whole-map scans dropped from 12262 forest cells to 0-4, so nothing
+-- got classified or excluded and the raw mottled material overlay showed
+-- through everywhere. 2 is the value that detected the forest correctly;
+-- the stray blobs are the min-size filter's job (FOREST_MIN_CELLS), not
+-- this threshold's.
+WailaTrailTracer.FOREST_MIN_DIVERSITY = 2
+WailaTrailTracer.FOREST_MAX_DOMINANT_FRACTION = 0.75
+
+local FOREST_TRACKED_MATERIALS = { MATERIAL_DIRT, MATERIAL_GRAVEL, MATERIAL_STONE }
+
+-- Real, deliberate exclusion: on-field ground gets the SAME treatment
+-- getTrailMaterialKindAt already gives it (registered fields have their
+-- own real boundary tracer, WailaFieldBoundaryTracer -- this was never
+-- forest's problem to solve). A cell counts as "on field" if ANY sample
+-- lands on one, not just the center -- a cell straddling a field edge
+-- should not get classified as forest just because its center happens to
+-- miss the boundary by a meter.
+-- Real, confirmed live bug ("last version scanned exactly these fields
+-- as forest"): the symmetric hole-filler below (smoothForestGrid) works
+-- on a plain boolean grid with no idea WHY a cell is false -- a real
+-- registered field poking a small notch into forest reads as just
+-- another small non-forest hole, and gets filled back in as forest,
+-- silently undoing the exclusion this function already correctly applied.
+-- Same risk for roads. Real fix: return a SECOND value, isProtected --
+-- true for field/road cells specifically (real ground truth, never
+-- eligible for filling regardless of component size), false for cells
+-- that are merely statistically below the forest threshold (genuinely
+-- fair game for the noise filter).
+local function classifyForestCell(cellMinX, cellMinZ, cellSize, samplesPerAxis)
+    local counts = {}
+    local totalSamples = 0
+
+    local step = cellSize / samplesPerAxis
+    for i = 0, samplesPerAxis - 1 do
+        for j = 0, samplesPerAxis - 1 do
+            local sampleX = cellMinX + (i + 0.5) * step
+            local sampleZ = cellMinZ + (j + 0.5) * step
+            if FSDensityMapUtil.getFieldDataAtWorldPosition(sampleX, 0, sampleZ) then
+                return false, true
+            end
+            -- Real, confirmed live gap: this classifier had zero road
+            -- awareness -- a coarse cell straddling or running alongside
+            -- a real road reads as "high diversity" the same way forest
+            -- dithering does (road material + nearby forest material in
+            -- the same cell), so roads were silently getting absorbed
+            -- into the forest blob instead of staying their own thing.
+            -- Same real road-spline exclusion getTrailMaterialKindAt
+            -- already uses (isNearRealRoad, built earlier this session) --
+            -- any sample near a real road means this cell is never
+            -- forest, same "any sample disqualifies the whole cell"
+            -- conservatism the field check above already uses.
+            if isNearRealRoad(sampleX, sampleZ) then
+                return false, true
+            end
+            local _, _, _, _, materialId = getTerrainAttributesAtWorldPos(g_terrainNode, sampleX, 0, sampleZ, true, true, true, true, false)
+            counts[materialId] = (counts[materialId] or 0) + 1
+            totalSamples = totalSamples + 1
+        end
+    end
+
+    if totalSamples == 0 then
+        return false, false
+    end
+
+    local diversity = 0
+    local maxCount = 0
+    for _, materialId in ipairs(FOREST_TRACKED_MATERIALS) do
+        local count = counts[materialId] or 0
+        if count > 0 then
+            diversity = diversity + 1
+        end
+        if count > maxCount then
+            maxCount = count
+        end
+    end
+
+    local dominantFraction = maxCount / totalSamples
+    -- Real, confirmed live regression (reverted, see git history/session
+    -- notes): a tree-presence requirement was tried here to rule out a
+    -- quarry/yard's edge reading as forest via material mix alone, but it
+    -- broke real forest detection that worked correctly without it, in
+    -- the same area -- likely because classifyGroundFeatureAt's own
+    -- header-flagged assumption ("canopy has no real collision") doesn't
+    -- hold on this map's tree assets. Material diversity + the min-size
+    -- filter is the committable baseline; the quarry problem stays open.
+    return diversity >= WailaTrailTracer.FOREST_MIN_DIVERSITY and dominantFraction < WailaTrailTracer.FOREST_MAX_DOMINANT_FRACTION, false
+end
+
+-- Real request ("add minimal size.. 1 random gravel field somewhere is
+-- for sure not a forest"), then a real, confirmed live correction ("or
+-- is that just the same problem in reverse? you eliminate < 3 cell
+-- positives.. and < 3 cell holes?"): the first version only flood-filled
+-- and cleared small TRUE components (forest islands) -- a small FALSE
+-- component (a hole, same underlying classification noise) was left
+-- completely untouched, no matter how tiny. Same noise, asymmetric
+-- treatment. Real fix: flood-fill ANY connected component regardless of
+-- its value, and flip it if it's under the size threshold -- small
+-- forest islands get cleared, small holes get filled, one rule applied
+-- symmetrically instead of two different ad-hoc ones. Filtered on the
+-- GRID itself, before tracing, not on the traced polygon afterward --
+-- filtering the polygon alone would leave the exclusion grid
+-- (currentChunkForestGrid, gating the detailed 1m scan) out of sync with
+-- what's actually shown as forest: a small false-positive patch would
+-- still get excluded from the detailed scan even though it's no longer
+-- displayed as forest, silently losing that ground's real material data
+-- entirely. Plain flood-fill connected-component labeling -- grids here
+-- are small (well under 300 cells even at debug-tile scale), nowhere
+-- near a real cost concern.
+WailaTrailTracer.FOREST_MIN_CELLS = 3
+
+-- protectedGrid marks cells that are false for a real, ground-truth
+-- reason (field/road, see classifyForestCell) rather than merely falling
+-- below the statistical forest threshold -- those cells never get
+-- flipped to forest by the fill direction below, no matter how small
+-- the surrounding false component is. Only matters for false-to-true
+-- fills, not true-to-false clears, since a protected cell is never true
+-- to begin with.
+local function smoothForestGrid(grid, protectedGrid, size, minCells)
+    local visited = {}
+    for row = 0, size - 1 do
+        visited[row] = {}
+    end
+
+    local function getCell(row, col)
+        local gridRow = grid[row]
+        return gridRow ~= nil and gridRow[col] == true
+    end
+
+    local function isProtected(row, col)
+        local protectedRow = protectedGrid[row]
+        return protectedRow ~= nil and protectedRow[col] == true
+    end
+
+    local function floodFill(startRow, startCol, value)
+        local stack = { { startRow, startCol } }
+        local cells = {}
+        visited[startRow][startCol] = true
+        while #stack > 0 do
+            local cell = table.remove(stack)
+            local row, col = cell[1], cell[2]
+            table.insert(cells, cell)
+            local neighbors = { { row - 1, col }, { row + 1, col }, { row, col - 1 }, { row, col + 1 } }
+            for _, neighbor in ipairs(neighbors) do
+                local nRow, nCol = neighbor[1], neighbor[2]
+                if nRow >= 0 and nRow < size and nCol >= 0 and nCol < size
+                    and not visited[nRow][nCol] and getCell(nRow, nCol) == value then
+                    visited[nRow][nCol] = true
+                    table.insert(stack, { nRow, nCol })
+                end
+            end
+        end
+        return cells
+    end
+
+    for row = 0, size - 1 do
+        for col = 0, size - 1 do
+            if not visited[row][col] then
+                local value = getCell(row, col)
+                local component = floodFill(row, col, value)
+                if #component < minCells then
+                    for _, cell in ipairs(component) do
+                        local cellRow, cellCol = cell[1], cell[2]
+                        if not isProtected(cellRow, cellCol) then
+                            if grid[cellRow] == nil then
+                                grid[cellRow] = {}
+                            end
+                            grid[cellRow][cellCol] = not value
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function rasterizeForestRegion(minX, minZ, maxX, maxZ, cellSize)
+    local size = math.ceil((maxX - minX) / cellSize)
+    local grid = {}
+    local protectedGrid = {}
+    for row = 0, size - 1 do
+        local gridRow = {}
+        local protectedRow = {}
+        for col = 0, size - 1 do
+            local cellMinX = minX + col * cellSize
+            local cellMinZ = minZ + row * cellSize
+            local isForest, isProtected = classifyForestCell(cellMinX, cellMinZ, cellSize, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
+            gridRow[col] = isForest
+            protectedRow[col] = isProtected
+        end
+        grid[row] = gridRow
+        protectedGrid[row] = protectedRow
+    end
+    smoothForestGrid(grid, protectedGrid, size, WailaTrailTracer.FOREST_MIN_CELLS)
+    return grid, minX, minZ, size
+end
+
+-- Shared by both buildForestOverlay (debug button) and tickWholeMapScan
+-- (whole-map, per chunk) -- takes an ALREADY-rasterized (and size-
+-- filtered) grid, since tickWholeMapScan needs that same grid for the
+-- detailed-scan exclusion lookup too and shouldn't rasterize twice.
+-- Real request ("1 outline, couple of points, done"): forest polygons
+-- were Chaikin-smoothed, which MULTIPLIES the point count (~8x for 3
+-- iterations) -- the opposite of what a 16m coarse outline needs. A grid
+-- trace puts a vertex at every cell-corner step; Douglas-Peucker with a
+-- tolerance of ~0.75 cell collapses a staircase into straight runs
+-- (the largest a 16m stair-step can deviate from its diagonal is ~11m)
+-- while still keeping real features like a one-cell notch (16m deep).
+-- Closed-loop wrapper around the existing open-polyline simplifyBoundary
+-- (which has a real prior divide-by-zero history, so reused rather than
+-- rewritten): split at the vertex farthest from vertex 1 so neither half
+-- gets a near-degenerate baseline, simplify each half, rejoin without
+-- duplicated endpoints (open-ring convention, same as every loop here).
+WailaTrailTracer.FOREST_SIMPLIFY_TOLERANCE = 12.0
+
+local function simplifyClosedLoop(loop, tolerance)
+    local n = #loop
+    if n <= 4 then
+        return loop
+    end
+
+    local farIndex, farDistSq = 2, 0
+    for i = 2, n do
+        local dx, dz = loop[i][1] - loop[1][1], loop[i][2] - loop[1][2]
+        local distSq = dx * dx + dz * dz
+        if distSq > farDistSq then
+            farDistSq, farIndex = distSq, i
+        end
+    end
+
+    local firstHalf, secondHalf = {}, {}
+    for i = 1, farIndex do
+        table.insert(firstHalf, loop[i])
+    end
+    for i = farIndex, n do
+        table.insert(secondHalf, loop[i])
+    end
+    table.insert(secondHalf, loop[1])
+
+    local simplifiedFirst = simplifyBoundary(firstHalf, tolerance)
+    local simplifiedSecond = simplifyBoundary(secondHalf, tolerance)
+
+    local result = {}
+    for i = 1, #simplifiedFirst do
+        table.insert(result, simplifiedFirst[i])
+    end
+    for i = 2, #simplifiedSecond - 1 do
+        table.insert(result, simplifiedSecond[i])
+    end
+
+    if #result < 3 then
+        return loop
+    end
+    return result
+end
+
+local function traceForestPolygonsFromGrid(grid, originX, originZ, size, cellSize)
+    local result = collectBorderSegments(grid, originX, originZ, size, cellSize)
+    local polygons = {}
+    for _, loop in ipairs(WailaTrailTracer.chainBorderLoops(result.segments)) do
+        table.insert(polygons, simplifyClosedLoop(loop, WailaTrailTracer.FOREST_SIMPLIFY_TOLERANCE))
+    end
+    return polygons, result.cellCount
+end
+
+-- Real integration, extracted from buildForestOverlay's own original
+-- body: the write+regenerate half, shared by BOTH the debug-button one-
+-- shot tool (forced regenerate, since it's a single press) and
+-- tickWholeMapScan's own per-chunk incremental accumulation (throttled,
+-- same 0.3s pattern buildTestOverlay already established, for the exact
+-- same "constant flashing" reason during an active scan). Both paths
+-- write into the SAME forestOverlayMap/forestOverlay -- one shared piece
+-- of state, not two independently-created overlays depending on how you
+-- triggered it.
+WailaTrailTracer.FOREST_OVERLAY_REGENERATE_INTERVAL_SEC = 0.3
+WailaTrailTracer.lastForestOverlayRegenerateTime = nil
+
+function WailaTrailTracer.buildForestOverlayIncremental(polygons, forceRegenerate)
+    local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    if WailaTrailTracer.forestOverlayMap == nil then
+        WailaTrailTracer.forestOverlayMap = createBitVectorMap("wailaForestOverlayMap")
+        loadBitVectorMapNew(WailaTrailTracer.forestOverlayMap, size, size, 1, false)
+        WailaTrailTracer.forestOverlay = createDensityMapVisualizationOverlay("wailaForestOverlay", size, size)
+    end
+
+    local map = WailaTrailTracer.forestOverlayMap
+    local modifier = DensityMapModifier.new(map, 0, 1, g_terrainNode)
+    for _, polygon in ipairs(polygons) do
+        modifier:clearPolygonPoints()
+        for _, point in ipairs(polygon) do
+            modifier:addPolygonPointWorldCoords(point[1], point[2])
+        end
+        modifier:executeSet(1)
+    end
+
+    local now = getTimeSec()
+    if not forceRegenerate and WailaTrailTracer.lastForestOverlayRegenerateTime ~= nil
+        and now - WailaTrailTracer.lastForestOverlayRegenerateTime < WailaTrailTracer.FOREST_OVERLAY_REGENERATE_INTERVAL_SEC then
+        return
+    end
+    WailaTrailTracer.lastForestOverlayRegenerateTime = now
+
+    resetDensityMapVisualizationOverlay(WailaTrailTracer.forestOverlay)
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.forestOverlay, map, 0, 0, 0, 1, 1, 0.05, 0.35, 0.05)
+    generateDensityMapVisualizationOverlay(WailaTrailTracer.forestOverlay)
+end
+
+-- Public: one debug-tile-sized area around (x, z), scanned once,
+-- synchronously -- a real cost AND shape-quality measurement, same as
+-- buildFeatureOverlay's own header reasoning. Logs cell/sample/polygon
+-- counts and timing so this can be compared directly against the raw
+-- 1m material scan's own numbers for the identical area.
+function WailaTrailTracer.buildForestOverlay(x, z)
+    local minX, minZ, maxX, maxZ = WailaTrailTracer.getTileBounds(x, z)
+    local cellSize = WailaTrailTracer.FOREST_CELL_SIZE
+    local size = math.ceil((maxX - minX) / cellSize)
+
+    local startTime = getTimeSec()
+    local grid, originX, originZ, gridSize = rasterizeForestRegion(minX, minZ, maxX, maxZ, cellSize)
+    local polygons, cellCount = traceForestPolygonsFromGrid(grid, originX, originZ, gridSize, cellSize)
+
+    WailaTrailTracer.buildForestOverlayIncremental(polygons, true)
+
+    local elapsedMs = (getTimeSec() - startTime) * 1000
+    local totalCells = size * size
+    local sampleCount = totalCells * WailaTrailTracer.FOREST_SAMPLES_PER_AXIS * WailaTrailTracer.FOREST_SAMPLES_PER_AXIS
+    log("buildForestOverlay: %dx%d cells (%.0fm each), %d sample(s), %d forest cell(s), %d polygon(s), %.0fms total (%.3fms/cell)",
+        size, size, cellSize, sampleCount, cellCount, #polygons, elapsedMs, elapsedMs / totalCells)
+
+    return true, totalCells, #polygons, elapsedMs
+end
+
+-- Real request ("prove we're not chasing a complexity problem in the
+-- minimap... just a simple diagonal line"): the dead-simplest possible
+-- overlay -- ONE polygon, corner-to-corner across the whole terrain, no
+-- material scanning, no spline sampling, no tick-budgeting, nothing that
+-- could hide a subtle data bug. Same render pipeline as every other
+-- overlay (own bit-vector map/overlay, DensityMapModifier polygon fill,
+-- drawn via the same drawFields hook) -- if this doesn't show on the
+-- minimap either, that's conclusive: the problem is minimap rendering
+-- reachability, not anything about our data. Bright magenta -- distinct
+-- from every other color already in use (trail gray/tan/green, road
+-- yellow, tree dark-green, water blue), impossible to mistake for
+-- anything else.
+function WailaTrailTracer.buildDiagonalTestOverlay()
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local minX, minZ = -terrainSize * 0.5, -terrainSize * 0.5
+    local maxX, maxZ = terrainSize * 0.5, terrainSize * 0.5
+
+    local chain = { { minX, minZ }, { maxX, maxZ } }
+    local ribbon = buildRibbonPolygon(chain, 40.0)
+
+    local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    if WailaTrailTracer.diagonalOverlayMap == nil then
+        WailaTrailTracer.diagonalOverlayMap = createBitVectorMap("wailaDiagonalOverlayMap")
+        loadBitVectorMapNew(WailaTrailTracer.diagonalOverlayMap, size, size, 1, false)
+        WailaTrailTracer.diagonalOverlay = createDensityMapVisualizationOverlay("wailaDiagonalOverlay", size, size)
+    end
+
+    local map = WailaTrailTracer.diagonalOverlayMap
+    local modifier = DensityMapModifier.new(map, 0, 1, g_terrainNode)
+    modifier:clearPolygonPoints()
+    for _, point in ipairs(ribbon) do
+        modifier:addPolygonPointWorldCoords(point[1], point[2])
+    end
+    modifier:executeSet(1)
+
+    resetDensityMapVisualizationOverlay(WailaTrailTracer.diagonalOverlay)
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.diagonalOverlay, map, 0, 0, 0, 1, 1, 1.0, 0.0, 1.0)
+    generateDensityMapVisualizationOverlay(WailaTrailTracer.diagonalOverlay)
+
+    log("buildDiagonalTestOverlay: one polygon, (%.0f,%.0f) to (%.0f,%.0f)", minX, minZ, maxX, maxZ)
+    return true
+end
+
 WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE = 64.0
+-- Real, confirmed live bug: a scan and a load/save running at once
+-- looked harmless (both are independent, tick-budgeted state machines)
+-- but aren't -- tickLoadFromXML's own completion does a HARD
+-- reassignment of the whole savedRegionsByMaterial table (see its own
+-- header), not a merge, so any region a concurrent scan freshly wrote
+-- during the load's 2+ minute runtime gets silently discarded the
+-- instant the load finishes. Real data loss, not just wasted CPU.
+-- Simplest robust fix, not a clever concurrent-merge: just refuse to
+-- start one while the other (or a save) is already running, with a
+-- clear log explaining why, same "prefer simple/robust" bias this file
+-- already leans on elsewhere.
 function WailaTrailTracer.startWholeMapScan()
+    if WailaTrailTracer.loadState ~= nil or WailaTrailTracer.saveState ~= nil then
+        log("startWholeMapScan: refused -- a trail save/load is already in progress, wait for it to finish first")
+        return
+    end
+
     local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
     local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
     local chunksPerSide = math.ceil(terrainSize / chunkSize)
@@ -2444,6 +3515,16 @@ end
 -- first). Bounded at ONE CHUNK (WHOLE_MAP_SCAN_CHUNK_SIZE, not
 -- DEBUG_TILE_SIZE) per call -- see that constant's own header for why
 -- a full 256m tile per tick was still a real, visible hitch.
+-- Real integration ("forest areas / map declared roads on top / rest of
+-- the map / squiggly mess is scanned the old way"): classifies this
+-- chunk's forest FIRST (coarse, 16m cells, cheap density-map-only
+-- reads), populates the per-chunk lookup getTrailMaterialKindAt already
+-- knows how to consult (see isInCurrentChunkForest's own header), THEN
+-- runs the existing detailed 1m material scan -- which now skips
+-- anything already classified as forest, never touching the expensive
+-- per-cell trace over ground we already know the shape of at the coarse
+-- level. Real roads stay excluded in both passes via isNearRealRoad
+-- (already wired into getTrailMaterialKindAt AND classifyForestCell).
 function WailaTrailTracer.tickWholeMapScan()
     local state = WailaTrailTracer.wholeMapScanState
     if state == nil then
@@ -2451,10 +3532,31 @@ function WailaTrailTracer.tickWholeMapScan()
     end
 
     local minX, minZ = state.originX + state.col * state.chunkSize, state.originZ + state.row * state.chunkSize
-    local scan = WailaTrailTracer.scanTileCells(minX, minZ, minX + state.chunkSize, minZ + state.chunkSize)
-    WailaTrailTracer.buildTestOverlay(scan.polygons)
+    local maxX, maxZ = minX + state.chunkSize, minZ + state.chunkSize
+
+    local forestGrid, forestOriginX, forestOriginZ, forestSize = rasterizeForestRegion(minX, minZ, maxX, maxZ, WailaTrailTracer.FOREST_CELL_SIZE)
+    currentChunkForestGrid = forestGrid
+    currentChunkForestOriginX = forestOriginX
+    currentChunkForestOriginZ = forestOriginZ
+    currentChunkForestCellSize = WailaTrailTracer.FOREST_CELL_SIZE
+    currentChunkForestSize = forestSize
+
+    local forestPolygons, forestCellCount = traceForestPolygonsFromGrid(forestGrid, forestOriginX, forestOriginZ, forestSize, WailaTrailTracer.FOREST_CELL_SIZE)
+    WailaTrailTracer.buildForestOverlayIncremental(forestPolygons)
+    state.totalForestCells = (state.totalForestCells or 0) + forestCellCount
+    state.totalForestPolygons = (state.totalForestPolygons or 0) + #forestPolygons
+    for _, polygon in ipairs(forestPolygons) do
+        state.totalForestPoints = (state.totalForestPoints or 0) + #polygon
+    end
+
+    local scan = WailaTrailTracer.scanTileCells(minX, minZ, maxX, maxZ)
+    WailaTrailTracer.buildTestOverlay(scan.polygonsByMaterial)
     state.totalCells = state.totalCells + scan.cellCount
-    state.totalPolygons = state.totalPolygons + #scan.polygons
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        state.totalPolygons = state.totalPolygons + #(scan.polygonsByMaterial[materialId] or {})
+    end
+
+    currentChunkForestGrid = nil
 
     state.col = state.col + 1
     if state.col >= state.chunksPerSide then
@@ -2463,12 +3565,309 @@ function WailaTrailTracer.tickWholeMapScan()
     end
 
     if state.row >= state.chunksPerSide then
+        -- Forced regenerate: the last chunk(s) scanned just before
+        -- completion could easily land inside the throttle window above
+        -- and never get shown otherwise.
+        WailaTrailTracer.buildTestOverlay({}, true)
+        WailaTrailTracer.buildForestOverlayIncremental({}, true)
         local elapsedMs = (getTimeSec() - state.startTime) * 1000
-        log("tickWholeMapScan done: %d chunk(s), %d cell(s), %d polygon(s), %.0fms total (%.1fs)",
-            state.chunksPerSide * state.chunksPerSide, state.totalCells, state.totalPolygons, elapsedMs, elapsedMs / 1000)
+        log("tickWholeMapScan done: %d chunk(s), %d cell(s), %d polygon(s), %d forest cell(s), %d forest polygon(s) / %d point(s), %.0fms total (%.1fs)",
+            state.chunksPerSide * state.chunksPerSide, state.totalCells, state.totalPolygons,
+            state.totalForestCells or 0, state.totalForestPolygons or 0, state.totalForestPoints or 0, elapsedMs, elapsedMs / 1000)
         WailaTrailTracer.wholeMapScanState = nil
         return true
     end
 
     return false
+end
+
+-- Real, confirmed live crash: the original saveToXML wrote 229,673
+-- polygons in ONE synchronous call ("game went unresponsive") -- same
+-- hard rule this whole file already learned once for scanning
+-- (feedback_waila_performance_is_non_negotiable), just violated again in
+-- the save path instead. Real, two-part fix, both required:
+--   1) recordScannedPolygons now dedupes by region (see its own header) --
+--      cuts the total polygon count for real, not just spreads the
+--      writing out.
+--   2) even deduped, a genuinely fragmented map (forests reading as
+--      scattered STONE patches, see MATERIAL_COLOR's own header) can
+--      still be tens of thousands of polygons -- so the actual per-
+--      polygon point-string writing (the expensive part, scales with
+--      polygon count) is now a tick-budgeted state machine
+--      (startSaveToXML + tickSaveToXML), same shape as
+--      startWholeMapScan/tickWholeMapScan. The cheap part -- one
+--      #id/#key attribute per material/region, at most a few thousand --
+--      is still written synchronously up front in startSaveToXML; only
+--      the part that scaled to 229k is deferred.
+-- Meant to be called from SavegameController.onSaveComplete (see
+-- FS25WhatAmILookingAt.lua) via startSaveToXML, then ticked every frame
+-- via FS25WhatAmILookingAt:update -- same "always safe to call, no-ops
+-- when nothing is running" contract tickWholeMapScan already uses.
+-- Region/material structure written as "x z x z ..." flat point strings
+-- (confirmed real via the base game's own FieldCourseField:saveToXMLFile)
+-- and materialId as a string (setString/getString, not xmlFile:setInt --
+-- getInt was never confirmed against real decompiled source).
+WailaTrailTracer.SAVE_TICK_BUDGET_SEC = 0.005
+
+function WailaTrailTracer.startSaveToXML()
+    if WailaTrailTracer.saveState ~= nil then
+        return false, "a save is already in progress"
+    end
+    if WailaTrailTracer.wholeMapScanState ~= nil then
+        return false, "a whole-map scan is in progress -- wait for it to finish so the save reflects its results"
+    end
+    if g_currentMission == nil or g_currentMission.missionInfo == nil then
+        return false, "no current mission"
+    end
+    local savegameDirectory = g_currentMission.missionInfo.savegameDirectory
+    if savegameDirectory == nil then
+        return false, "no savegame directory"
+    end
+
+    local path = savegameDirectory .. "/" .. WailaTrailTracer.SAVEGAME_FILENAME
+    local xmlFile = XMLFile.create("wailaTrail", path, "wailaTrail")
+    if xmlFile == nil then
+        return false, "XMLFile.create failed"
+    end
+
+    local workItems = {}
+    for materialIndex, materialId in ipairs(SPLIT_MATERIALS) do
+        local materialKey = string.format("wailaTrail.materials.material(%d)", materialIndex - 1)
+        xmlFile:setString(materialKey .. "#id", tostring(materialId))
+
+        local regionIndex = 0
+        for regionKey, polygons in pairs(WailaTrailTracer.savedRegionsByMaterial[materialId]) do
+            local regionElementKey = string.format("%s.region(%d)", materialKey, regionIndex)
+            regionIndex = regionIndex + 1
+            xmlFile:setString(regionElementKey .. "#key", regionKey)
+
+            for polyIndex, polygon in ipairs(polygons) do
+                table.insert(workItems, {
+                    key = string.format("%s.polygon(%d)#points", regionElementKey, polyIndex - 1),
+                    polygon = polygon,
+                })
+            end
+        end
+    end
+
+    WailaTrailTracer.saveState = {
+        xmlFile = xmlFile,
+        path = path,
+        workItems = workItems,
+        index = 1,
+        startTime = getTimeSec(),
+    }
+    log("startSaveToXML: %d polygon(s) queued, writing incrementally", #workItems)
+    return true
+end
+
+-- Public: call once per frame. Returns true once done (or if no save is
+-- running, so callers can call this unconditionally every tick, same
+-- contract as tickWholeMapScan).
+function WailaTrailTracer.tickSaveToXML()
+    local state = WailaTrailTracer.saveState
+    if state == nil then
+        return true
+    end
+
+    local tickStart = getTimeSec()
+    while state.index <= #state.workItems do
+        local item = state.workItems[state.index]
+        local parts = {}
+        for _, point in ipairs(item.polygon) do
+            table.insert(parts, string.format("%.2f %.2f", point[1], point[2]))
+        end
+        state.xmlFile:setString(item.key, table.concat(parts, " "))
+        state.index = state.index + 1
+
+        if getTimeSec() - tickStart > WailaTrailTracer.SAVE_TICK_BUDGET_SEC then
+            return false
+        end
+    end
+
+    state.xmlFile:save()
+    state.xmlFile:delete()
+    local elapsedMs = (getTimeSec() - state.startTime) * 1000
+    log("tickSaveToXML done: %d polygon(s) written to %s in %.0fms (%.1fs)", #state.workItems, state.path, elapsedMs, elapsedMs / 1000)
+    WailaTrailTracer.saveState = nil
+    return true
+end
+
+-- Symmetric with startSaveToXML/tickSaveToXML above, same reasoning: the
+-- expensive parts (per-polygon point-string parsing AND the native
+-- DensityMapModifier writes buildTestOverlay makes) are deferred into a
+-- tick-budgeted state machine instead of one synchronous call replaying
+-- a potentially huge dataset at once. Cheap structure (material/region
+-- keys) is still read up front in startLoadFromXML. Rebuilds
+-- savedRegionsByMaterial with its REAL region keys (not synthetic ones)
+-- so a save made right after a load -- with no new scanning in between --
+-- still dedupes correctly against what was loaded.
+WailaTrailTracer.LOAD_TICK_BUDGET_SEC = 0.005
+
+-- Real, confirmed live bug: every early-return path here was completely
+-- silent -- confirmed via log, startLoadFromXML logged its "queued"
+-- message exactly ONCE across an entire session's worth of repeated
+-- restarts (field-index sweeps restarting fresh each time proved
+-- loadMap()/setupComponents() really was running every time -- this
+-- function just wasn't visibly doing anything on any of those later
+-- calls). Real "why nothing happens on load" root cause: no way to tell
+-- WHICH of the three early-return conditions was silently firing. Every
+-- branch now logs, so the next test tells us exactly what's happening
+-- instead of needing another guess.
+function WailaTrailTracer.startLoadFromXML()
+    if WailaTrailTracer.loadState ~= nil then
+        log("startLoadFromXML: a load is already in progress, skipping duplicate call")
+        return
+    end
+    if WailaTrailTracer.wholeMapScanState ~= nil then
+        log("startLoadFromXML: refused -- a whole-map scan is already in progress, wait for it to finish first")
+        return
+    end
+    if g_currentMission == nil or g_currentMission.missionInfo == nil then
+        log("startLoadFromXML: g_currentMission or missionInfo not ready yet, skipping")
+        return
+    end
+    local savegameDirectory = g_currentMission.missionInfo.savegameDirectory
+    if savegameDirectory == nil then
+        log("startLoadFromXML: missionInfo.savegameDirectory is nil, skipping")
+        return
+    end
+
+    local path = savegameDirectory .. "/" .. WailaTrailTracer.SAVEGAME_FILENAME
+    local xmlFile = XMLFile.loadIfExists("wailaTrail", path)
+    if xmlFile == nil then
+        log("startLoadFromXML: no file at %s (or failed to load), nothing to restore", path)
+        return
+    end
+
+    local loadedRegions = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} }
+    local workItems = {}
+
+    for _, materialElementKey in xmlFile:iterator("wailaTrail.materials.material") do
+        local materialId = tonumber(xmlFile:getString(materialElementKey .. "#id"))
+        if materialId ~= nil and loadedRegions[materialId] ~= nil then
+            for _, regionElementKey in xmlFile:iterator(materialElementKey .. ".region") do
+                local regionKey = xmlFile:getString(regionElementKey .. "#key")
+                if regionKey ~= nil then
+                    local polygons = {}
+                    loadedRegions[materialId][regionKey] = polygons
+                    for _, polygonElementKey in xmlFile:iterator(regionElementKey .. ".polygon") do
+                        table.insert(workItems, { materialId = materialId, polygons = polygons, polygonElementKey = polygonElementKey })
+                    end
+                end
+            end
+        end
+    end
+
+    WailaTrailTracer.loadState = {
+        xmlFile = xmlFile,
+        workItems = workItems,
+        index = 1,
+        loadedRegions = loadedRegions,
+        pendingByMaterial = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} },
+        startTime = getTimeSec(),
+        lastProgressLogTime = getTimeSec(),
+        polygonCount = 0,
+    }
+    log("startLoadFromXML: %d polygon(s) queued, restoring incrementally", #workItems)
+end
+
+-- Flushes whatever raw polygons tickLoadFromXML has parsed so far into
+-- the live overlay -- called at least once per tick (bounded batch size,
+-- never the whole dataset at once) and once more at the very end.
+local function flushPendingLoadBatch(state)
+    local hasAny = false
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        if #state.pendingByMaterial[materialId] > 0 then
+            hasAny = true
+        end
+    end
+    if not hasAny then
+        return
+    end
+    WailaTrailTracer.buildTestOverlay(state.pendingByMaterial)
+    for _, materialId in ipairs(SPLIT_MATERIALS) do
+        state.pendingByMaterial[materialId] = {}
+    end
+end
+
+-- Public: call once per frame. Returns true once done (or if no load is
+-- running), same contract as tickSaveToXML/tickWholeMapScan.
+-- Real, confirmed live bug: the first version of this only time-budgeted
+-- the cheap parse loop below and left the actual flushPendingLoadBatch
+-- call (real DensityMapModifier native writes -- the expensive part)
+-- completely unbounded. Since parsing is fast, thousands of raw polygons
+-- could pile up in a single tick before one, uncapped flush -- defeating
+-- the whole point of ticking this at all (confirmed live: restoring
+-- 229,845 polygons never printed "done" even after ~90s of real
+-- gameplay). Flushing in small, FIXED-SIZE batches (LOAD_MAX_BATCH_SIZE),
+-- not just once per tick, bounds the native call's own cost too, not
+-- only the parsing around it.
+WailaTrailTracer.LOAD_MAX_BATCH_SIZE = 50
+
+function WailaTrailTracer.tickLoadFromXML()
+    local state = WailaTrailTracer.loadState
+    if state == nil then
+        return true
+    end
+
+    local tickStart = getTimeSec()
+    local pendingCount = 0
+    while state.index <= #state.workItems do
+        local item = state.workItems[state.index]
+        local pointsStr = state.xmlFile:getString(item.polygonElementKey .. "#points")
+        if pointsStr ~= nil then
+            local numbers = string.split(pointsStr, " ")
+            local rawPolygon = {}
+            for i = 1, #numbers, 2 do
+                local px = tonumber(numbers[i])
+                local pz = tonumber(numbers[i + 1])
+                if px ~= nil and pz ~= nil then
+                    table.insert(rawPolygon, { px, pz })
+                end
+            end
+            table.insert(item.polygons, rawPolygon)
+            -- Persisted as RAW (pre-Chaikin) loops -- re-smoothed here,
+            -- once, before being handed to buildTestOverlay. See
+            -- recordScannedPolygons' own header for why.
+            table.insert(state.pendingByMaterial[item.materialId], WailaTrailTracer.smoothClosedLoop(rawPolygon))
+            state.polygonCount = state.polygonCount + 1
+            pendingCount = pendingCount + 1
+        end
+        state.index = state.index + 1
+
+        if pendingCount >= WailaTrailTracer.LOAD_MAX_BATCH_SIZE then
+            flushPendingLoadBatch(state)
+            pendingCount = 0
+        end
+
+        if getTimeSec() - tickStart > WailaTrailTracer.LOAD_TICK_BUDGET_SEC then
+            flushPendingLoadBatch(state)
+            -- Real request-worthy gap: the first version gave no sign of
+            -- life while restoring (no "done" line for 90+ seconds looked
+            -- indistinguishable from "stuck", confirmed live). A periodic
+            -- progress line (every ~2s of wall time) makes forward
+            -- progress visible without waiting for full completion.
+            local now = getTimeSec()
+            if now - state.lastProgressLogTime > 2.0 then
+                state.lastProgressLogTime = now
+                log("tickLoadFromXML progress: %d / %d polygon(s) restored so far", state.index - 1, #state.workItems)
+            end
+            return false
+        end
+    end
+
+    flushPendingLoadBatch(state)
+    -- Same forced-regenerate reasoning as tickWholeMapScan's own
+    -- completion -- the last flush could land inside the throttle
+    -- window and never actually show without this.
+    WailaTrailTracer.buildTestOverlay({}, true)
+    state.xmlFile:delete()
+
+    WailaTrailTracer.savedRegionsByMaterial = state.loadedRegions
+
+    local elapsedMs = (getTimeSec() - state.startTime) * 1000
+    log("tickLoadFromXML done: %d polygon(s) restored in %.0fms (%.1fs)", state.polygonCount, elapsedMs, elapsedMs / 1000)
+    WailaTrailTracer.loadState = nil
+    return true
 end

@@ -155,6 +155,11 @@ function FS25WhatAmILookingAt:setupComponents()
         { label = "Paint layer test row", run = function() mod:onPlaceTerrainLayerTestRow() end },
         { label = "Dump density probe", run = function() mod:onDumpDensityProbe() end },
         { label = "Dump ground layer dataPlane probe", run = function() mod:onDumpGroundDensityProbe() end },
+        { label = "Dump road nodes", run = function() mod:onDumpRoadNodes() end },
+        { label = "Build road overlay (from real splines)", run = function() mod:onBuildRoadOverlay() end },
+        { label = "Build tree/water overlay near player", run = function() mod:onBuildFeatureOverlay() end },
+        { label = "Build diagonal test overlay (simplest possible)", run = function() mod:onBuildDiagonalTestOverlay() end },
+        { label = "Build forest overlay near player (diversity classifier)", run = function() mod:onBuildForestOverlay() end },
     })
 
     registerActionTab("foliage", "Foliage", {
@@ -239,6 +244,13 @@ function FS25WhatAmILookingAt:setupComponents()
     -- reason (see Waila.lua's own header comment); this one simply never
     -- got the same treatment when it was built.
     g_currentMission.wailaTrailTracer = WailaTrailTracer
+
+    -- Restores the trail overlay from <savegame>/wailaTrail.xml (if one
+    -- exists) -- same spot fieldIndex:start() calls its own loadFromXML
+    -- from, just above. Only queues the work here; startLoadFromXML's own
+    -- header explains why the actual restore is tick-budgeted (see
+    -- update() below) rather than done synchronously in one call.
+    WailaTrailTracer.startLoadFromXML()
 
     -- Self-test: WAILA subscribing to its own event, just to confirm the
     -- whole pipeline (scan -> registry -> vehicle-leave detection -> fire)
@@ -483,6 +495,47 @@ function FS25WhatAmILookingAt:onDumpGroundDensityProbe()
     self.debugTools:dumpGroundDensityProbe(self.current.hit.x, self.current.hit.y, self.current.hit.z)
 end
 
+function FS25WhatAmILookingAt:onDumpRoadNodes()
+    self.debugTools:dumpRoadNodes()
+end
+
+function FS25WhatAmILookingAt:onBuildRoadOverlay()
+    local success, splineCountOrReason, polygonCount = WailaTrailTracer.buildRoadSplineOverlay()
+    if success then
+        log("[RoadOverlay] built from %d spline(s), %d ribbon polygon(s)", splineCountOrReason, polygonCount)
+    else
+        log("[RoadOverlay] failed: %s", tostring(splineCountOrReason))
+    end
+end
+
+function FS25WhatAmILookingAt:onBuildDiagonalTestOverlay()
+    WailaTrailTracer.buildDiagonalTestOverlay()
+end
+
+function FS25WhatAmILookingAt:onBuildForestOverlay()
+    if self.current == nil or self.current.hit == nil then
+        log("[ForestOverlay] No current terrain target")
+        return
+    end
+
+    local success, cellCount, polygonCount, elapsedMs = WailaTrailTracer.buildForestOverlay(self.current.hit.x, self.current.hit.z)
+    if success then
+        log("[ForestOverlay] %d cell(s), %d polygon(s), %.0fms", cellCount, polygonCount, elapsedMs)
+    end
+end
+
+function FS25WhatAmILookingAt:onBuildFeatureOverlay()
+    if self.current == nil or self.current.hit == nil then
+        log("[FeatureOverlay] No current terrain target")
+        return
+    end
+
+    local success, cellCount, treeCount, waterCount, elapsedMs = WailaTrailTracer.buildFeatureOverlay(self.current.hit.x, self.current.hit.z)
+    if success then
+        log("[FeatureOverlay] %d cell(s), %d tree polygon(s), %d water polygon(s), %.0fms", cellCount, treeCount, waterCount, elapsedMs)
+    end
+end
+
 -- Writes waila.xml on demand (not waiting for a real savegame save) --
 -- readable field data (crop/growth/weed/spray/lime) per known field,
 -- an alternative to reading the same information back out of a log dump.
@@ -531,6 +584,14 @@ function FS25WhatAmILookingAt:update(dt)
     if self.areaTracker ~= nil then
         self.areaTracker:update(dt)
     end
+
+    -- Trail overlay save/load, tick-budgeted -- both are safe to call
+    -- unconditionally every frame (no-op when nothing is running), same
+    -- contract as WailaTrailTracer.tickWholeMapScan. See
+    -- startSaveToXML/startLoadFromXML's own headers for why this can't
+    -- just be one synchronous call.
+    WailaTrailTracer.tickSaveToXML()
+    WailaTrailTracer.tickLoadFromXML()
 
     -- Same toggle as the field-boundary overlay below -- one switch for
     -- "show me WAILA's world-scanning debug view", not two separate ones.
@@ -726,6 +787,9 @@ addModEventListener(FS25WhatAmILookingAt)
 local function onSavegameControllerSaveComplete(self, errorCode)
     if errorCode == Savegame.ERROR_OK and FS25WhatAmILookingAt.fieldIndex ~= nil then
         FS25WhatAmILookingAt.fieldIndex:saveToXML()
+    end
+    if errorCode == Savegame.ERROR_OK then
+        WailaTrailTracer.startSaveToXML()
     end
 end
 SavegameController.onSaveComplete = Utils.appendedFunction(SavegameController.onSaveComplete, onSavegameControllerSaveComplete)

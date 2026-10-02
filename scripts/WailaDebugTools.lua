@@ -314,6 +314,51 @@ function WailaDebugTools:dumpGroundDensityProbe(hx, hy, hz)
     end
 end
 
+-- Real find (2026-09-23, user read the map's own map.i3d directly, not
+-- inferred): this map declares real roads as named TransformGroup/Shape
+-- nodes ("roadDirt" confirmed, likely "roadGravel"/others alongside it),
+-- each Shape marked terrainDecal="true" -- actual authored road
+-- geometry, not just paint. Real, direct candidate for excluding real
+-- roads from WailaTrailTracer's STONE-material false positives (a real
+-- road sitting on stone-classified terrain currently gets painted as if
+-- it were newly detected wear -- confirmed live, see the trail overlay
+-- screenshot showing green lines along real roads). This is a read-only
+-- probe, not the exclusion filter itself -- confirms WHICH root these
+-- nodes are actually reachable from at runtime before building anything
+-- on top of that assumption. g_currentMission.terrainRootNode is the
+-- best-guess candidate (already used elsewhere for ground data planes,
+-- see resolveGroundDataPlaneIds' own "unclear which" comment);
+-- getRootNode() (the real scene root, already used elsewhere in this
+-- file) is the fallback if that comes up empty.
+-- I3DUtil.iterateRecursively is the same real node-walker the base
+-- game's own TrafficSystem uses for its spline validation (confirmed via
+-- decompile of TrafficSystem.lua) -- reused directly, not reinvented.
+function WailaDebugTools:dumpRoadNodes()
+    local roots = {
+        terrainRootNode = g_currentMission.terrainRootNode,
+        sceneRoot = getRootNode(),
+    }
+
+    for rootLabel, rootId in pairs(roots) do
+        if rootId == nil or rootId == 0 then
+            log("[RoadNodes] root '%s' is nil/0, skipping", rootLabel)
+        else
+            local found = 0
+            I3DUtil.iterateRecursively(rootId, function(node, depth)
+                local name = getName(node)
+                if name ~= nil and string.find(string.lower(name), "road") ~= nil then
+                    found = found + 1
+                    if found <= 20 then
+                        local x, y, z = getWorldTranslation(node)
+                        log("[RoadNodes] root=%s depth=%d name=%s pos=(%.1f, %.1f, %.1f)", rootLabel, depth, name, x, y, z)
+                    end
+                end
+            end)
+            log("[RoadNodes] root=%s: %d node(s) with 'road' in the name (showing up to 20)", rootLabel, found)
+        end
+    end
+end
+
 -- Real angle-control problem found live: the rig used to be pure
 -- axis-aligned offsets from origin, no rotation input anywhere -- placed
 -- via a raw debug button with whatever direction the last raycast
