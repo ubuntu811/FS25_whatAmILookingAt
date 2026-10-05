@@ -126,6 +126,22 @@ WailaTrailTracer.SAVEGAME_FILENAME = "wailaTrail.xml"
 -- so every present AND future scan path (whole-map ticks, single-tile
 -- debug traces, a future vehicle-triggered local rescan) is captured
 -- automatically, with nothing to remember at each call site.
+-- Real, confirmed live gap ("any chance we're not saving the forest areas
+-- yet?"): forest polygons were never persisted at all -- and since forest
+-- ground is EXCLUDED from the detailed material scan, a restart restored
+-- only thin edge outlines and left the whole forest interior empty. Same
+-- region-keyed replace-on-rescan shape as the material store; regions
+-- with no forest are stored as nothing (nil), so an empty rescan also
+-- removes a stale entry. Polygons here are already simplified outlines
+-- (see traceForestPolygonsFromGrid), so unlike material polygons they are
+-- NOT re-smoothed on load.
+WailaTrailTracer.savedForestRegions = {}
+
+function WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, polygons)
+    local regionKey = string.format("%.1f_%.1f_%.1f_%.1f", minX, minZ, maxX, maxZ)
+    WailaTrailTracer.savedForestRegions[regionKey] = #polygons > 0 and polygons or nil
+end
+
 function WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, rawPolygonsByMaterial)
     local regionKey = string.format("%.1f_%.1f_%.1f_%.1f", minX, minZ, maxX, maxZ)
     for _, materialId in ipairs(SPLIT_MATERIALS) do
@@ -3480,6 +3496,7 @@ function WailaTrailTracer.buildForestOverlay(x, z)
     local grid, originX, originZ, gridSize = rasterizeForestWindow(minX, minZ, size, WailaTrailTracer.FOREST_HALO_CELLS, cellSize)
     local polygons, cellCount = traceForestPolygonsFromGrid(grid, originX, originZ, gridSize, cellSize)
 
+    WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, polygons)
     WailaTrailTracer.buildForestOverlayIncremental(polygons, true)
 
     local elapsedMs = (getTimeSec() - startTime) * 1000
@@ -3606,6 +3623,7 @@ function WailaTrailTracer.tickWholeMapScan()
     currentChunkForestSize = forestSize
 
     local forestPolygons, forestCellCount = traceForestPolygonsFromGrid(forestGrid, forestOriginX, forestOriginZ, forestSize, WailaTrailTracer.FOREST_CELL_SIZE)
+    WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, forestPolygons)
     WailaTrailTracer.buildForestOverlayIncremental(forestPolygons)
     state.totalForestCells = (state.totalForestCells or 0) + forestCellCount
     state.totalForestPolygons = (state.totalForestPolygons or 0) + #forestPolygons
@@ -3714,6 +3732,19 @@ function WailaTrailTracer.startSaveToXML()
         end
     end
 
+    local forestRegionIndex = 0
+    for regionKey, polygons in pairs(WailaTrailTracer.savedForestRegions) do
+        local regionElementKey = string.format("wailaTrail.forest.region(%d)", forestRegionIndex)
+        forestRegionIndex = forestRegionIndex + 1
+        xmlFile:setString(regionElementKey .. "#key", regionKey)
+        for polyIndex, polygon in ipairs(polygons) do
+            table.insert(workItems, {
+                key = string.format("%s.polygon(%d)#points", regionElementKey, polyIndex - 1),
+                polygon = polygon,
+            })
+        end
+    end
+
     WailaTrailTracer.saveState = {
         xmlFile = xmlFile,
         path = path,
@@ -3721,7 +3752,7 @@ function WailaTrailTracer.startSaveToXML()
         index = 1,
         startTime = getTimeSec(),
     }
-    log("startSaveToXML: %d polygon(s) queued, writing incrementally", #workItems)
+    log("startSaveToXML: %d polygon(s) queued (%d forest region(s)), writing incrementally", #workItems, forestRegionIndex)
     return true
 end
 
@@ -3823,23 +3854,46 @@ function WailaTrailTracer.startLoadFromXML()
         end
     end
 
+    local loadedForest = {}
+    for _, regionElementKey in xmlFile:iterator("wailaTrail.forest.region") do
+        local regionKey = xmlFile:getString(regionElementKey .. "#key")
+        if regionKey ~= nil then
+            local polygons = {}
+            loadedForest[regionKey] = polygons
+            for _, polygonElementKey in xmlFile:iterator(regionElementKey .. ".polygon") do
+                table.insert(workItems, { isForest = true, polygons = polygons, polygonElementKey = polygonElementKey })
+            end
+        end
+    end
+
     WailaTrailTracer.loadState = {
         xmlFile = xmlFile,
         workItems = workItems,
         index = 1,
         loadedRegions = loadedRegions,
+        loadedForest = loadedForest,
+        pendingForest = {},
         pendingByMaterial = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} },
         startTime = getTimeSec(),
         lastProgressLogTime = getTimeSec(),
         polygonCount = 0,
     }
-    log("startLoadFromXML: %d polygon(s) queued, restoring incrementally", #workItems)
+    local forestRegionCount = 0
+    for _ in pairs(loadedForest) do
+        forestRegionCount = forestRegionCount + 1
+    end
+    log("startLoadFromXML: %d polygon(s) queued (%d forest region(s)), restoring incrementally", #workItems, forestRegionCount)
 end
 
 -- Flushes whatever raw polygons tickLoadFromXML has parsed so far into
 -- the live overlay -- called at least once per tick (bounded batch size,
 -- never the whole dataset at once) and once more at the very end.
 local function flushPendingLoadBatch(state)
+    if #state.pendingForest > 0 then
+        WailaTrailTracer.buildForestOverlayIncremental(state.pendingForest)
+        state.pendingForest = {}
+    end
+
     local hasAny = false
     for _, materialId in ipairs(SPLIT_MATERIALS) do
         if #state.pendingByMaterial[materialId] > 0 then
@@ -3891,10 +3945,14 @@ function WailaTrailTracer.tickLoadFromXML()
                 end
             end
             table.insert(item.polygons, rawPolygon)
-            -- Persisted as RAW (pre-Chaikin) loops -- re-smoothed here,
-            -- once, before being handed to buildTestOverlay. See
-            -- recordScannedPolygons' own header for why.
-            table.insert(state.pendingByMaterial[item.materialId], WailaTrailTracer.smoothClosedLoop(rawPolygon))
+            if item.isForest then
+                table.insert(state.pendingForest, rawPolygon)
+            else
+                -- Persisted as RAW (pre-Chaikin) loops -- re-smoothed
+                -- here, once, before being handed to buildTestOverlay.
+                -- See recordScannedPolygons' own header for why.
+                table.insert(state.pendingByMaterial[item.materialId], WailaTrailTracer.smoothClosedLoop(rawPolygon))
+            end
             state.polygonCount = state.polygonCount + 1
             pendingCount = pendingCount + 1
         end
@@ -3926,9 +3984,11 @@ function WailaTrailTracer.tickLoadFromXML()
     -- completion -- the last flush could land inside the throttle
     -- window and never actually show without this.
     WailaTrailTracer.buildTestOverlay({}, true)
+    WailaTrailTracer.buildForestOverlayIncremental({}, true)
     state.xmlFile:delete()
 
     WailaTrailTracer.savedRegionsByMaterial = state.loadedRegions
+    WailaTrailTracer.savedForestRegions = state.loadedForest
 
     local elapsedMs = (getTimeSec() - state.startTime) * 1000
     log("tickLoadFromXML done: %d polygon(s) restored in %.0fms (%.1fs)", state.polygonCount, elapsedMs, elapsedMs / 1000)
