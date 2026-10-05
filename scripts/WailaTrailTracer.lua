@@ -3206,16 +3206,28 @@ end
 -- entirely. Plain flood-fill connected-component labeling -- grids here
 -- are small (well under 300 cells even at debug-tile scale), nowhere
 -- near a real cost concern.
+-- Real, confirmed live: holes in a big forest were ~4-5 cells across --
+-- bigger than a 4x4 chunk grid can even represent, so no per-chunk
+-- threshold could fill them (and one above 16 cells would flip EVERY
+-- component in a chunk). Two real fixes: (1) each chunk is smoothed in a
+-- WINDOW with a halo of neighbouring cells (classification cached per
+-- cell, so the halo costs no extra terrain reads), and only the chunk's
+-- own center is traced -- still one-or-more polygons per tile, no cross-
+-- tile merging; (2) a component touching the window edge is never
+-- flipped, since it may continue beyond what's visible. Islands and
+-- holes get SEPARATE thresholds because the costs are asymmetric:
+-- filling a hole only excludes more ground from the expensive 1m scan,
+-- while clearing a forest island sends that ground back into it.
 WailaTrailTracer.FOREST_MIN_CELLS = 3
+WailaTrailTracer.FOREST_MIN_HOLE_CELLS = 40
+WailaTrailTracer.FOREST_HALO_CELLS = 6
 
 -- protectedGrid marks cells that are false for a real, ground-truth
 -- reason (field/road, see classifyForestCell) rather than merely falling
 -- below the statistical forest threshold -- those cells never get
 -- flipped to forest by the fill direction below, no matter how small
--- the surrounding false component is. Only matters for false-to-true
--- fills, not true-to-false clears, since a protected cell is never true
--- to begin with.
-local function smoothForestGrid(grid, protectedGrid, size, minCells)
+-- the surrounding false component is.
+local function smoothForestGrid(grid, protectedGrid, size, minIslandCells, minHoleCells)
     local visited = {}
     for row = 0, size - 1 do
         visited[row] = {}
@@ -3234,11 +3246,15 @@ local function smoothForestGrid(grid, protectedGrid, size, minCells)
     local function floodFill(startRow, startCol, value)
         local stack = { { startRow, startCol } }
         local cells = {}
+        local touchesEdge = false
         visited[startRow][startCol] = true
         while #stack > 0 do
             local cell = table.remove(stack)
             local row, col = cell[1], cell[2]
             table.insert(cells, cell)
+            if row == 0 or col == 0 or row == size - 1 or col == size - 1 then
+                touchesEdge = true
+            end
             local neighbors = { { row - 1, col }, { row + 1, col }, { row, col - 1 }, { row, col + 1 } }
             for _, neighbor in ipairs(neighbors) do
                 local nRow, nCol = neighbor[1], neighbor[2]
@@ -3249,21 +3265,19 @@ local function smoothForestGrid(grid, protectedGrid, size, minCells)
                 end
             end
         end
-        return cells
+        return cells, touchesEdge
     end
 
     for row = 0, size - 1 do
         for col = 0, size - 1 do
             if not visited[row][col] then
                 local value = getCell(row, col)
-                local component = floodFill(row, col, value)
-                if #component < minCells then
+                local component, touchesEdge = floodFill(row, col, value)
+                local threshold = value and minIslandCells or minHoleCells
+                if not touchesEdge and #component < threshold then
                     for _, cell in ipairs(component) do
                         local cellRow, cellCol = cell[1], cell[2]
                         if not isProtected(cellRow, cellCol) then
-                            if grid[cellRow] == nil then
-                                grid[cellRow] = {}
-                            end
                             grid[cellRow][cellCol] = not value
                         end
                     end
@@ -3273,25 +3287,69 @@ local function smoothForestGrid(grid, protectedGrid, size, minCells)
     end
 end
 
-local function rasterizeForestRegion(minX, minZ, maxX, maxZ, cellSize)
-    local size = math.ceil((maxX - minX) / cellSize)
-    local grid = {}
-    local protectedGrid = {}
+-- Per-cell classification cache, keyed by whole-map cell index (the
+-- terrain-centered grid every chunk/tile already aligns to). Fields and
+-- roads are static and thresholds only change on redeploy, so a scan
+-- never needs to classify a cell twice -- which is what makes the halo
+-- free: a neighbour's cells get classified once, early, not once per
+-- window that happens to include them. 0 = not forest, 1 = forest,
+-- 2 = protected (field/road/outside the map).
+local forestCellCache = {}
+
+function WailaTrailTracer.resetForestCellCache()
+    forestCellCache = {}
+end
+
+-- Smooths a (innerCells + 2*halo)^2 window, returns only the inner grid
+-- (origin = minX/minZ), so callers trace/exclude exactly their own tile.
+local function rasterizeForestWindow(minX, minZ, innerCells, halo, cellSize)
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local worldMin = -terrainSize * 0.5
+    local mapCells = math.floor(terrainSize / cellSize)
+    local baseGx = math.floor((minX - worldMin) / cellSize + 0.5) - halo
+    local baseGz = math.floor((minZ - worldMin) / cellSize + 0.5) - halo
+    local size = innerCells + 2 * halo
+
+    local grid, protectedGrid = {}, {}
     for row = 0, size - 1 do
-        local gridRow = {}
-        local protectedRow = {}
+        local gridRow, protectedRow = {}, {}
+        local gz = baseGz + row
         for col = 0, size - 1 do
-            local cellMinX = minX + col * cellSize
-            local cellMinZ = minZ + row * cellSize
-            local isForest, isProtected = classifyForestCell(cellMinX, cellMinZ, cellSize, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
-            gridRow[col] = isForest
-            protectedRow[col] = isProtected
+            local gx = baseGx + col
+            local value
+            if gx < 0 or gz < 0 or gx >= mapCells or gz >= mapCells then
+                value = 2
+            else
+                local colCache = forestCellCache[gx]
+                if colCache == nil then
+                    colCache = {}
+                    forestCellCache[gx] = colCache
+                end
+                value = colCache[gz]
+                if value == nil then
+                    local isForest, isProtected = classifyForestCell(worldMin + gx * cellSize, worldMin + gz * cellSize, cellSize, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
+                    value = isProtected and 2 or (isForest and 1 or 0)
+                    colCache[gz] = value
+                end
+            end
+            gridRow[col] = value == 1
+            protectedRow[col] = value == 2
         end
         grid[row] = gridRow
         protectedGrid[row] = protectedRow
     end
-    smoothForestGrid(grid, protectedGrid, size, WailaTrailTracer.FOREST_MIN_CELLS)
-    return grid, minX, minZ, size
+
+    smoothForestGrid(grid, protectedGrid, size, WailaTrailTracer.FOREST_MIN_CELLS, WailaTrailTracer.FOREST_MIN_HOLE_CELLS)
+
+    local inner = {}
+    for row = 0, innerCells - 1 do
+        local innerRow = {}
+        for col = 0, innerCells - 1 do
+            innerRow[col] = grid[row + halo][col + halo]
+        end
+        inner[row] = innerRow
+    end
+    return inner, minX, minZ, innerCells
 end
 
 -- Shared by both buildForestOverlay (debug button) and tickWholeMapScan
@@ -3305,12 +3363,16 @@ end
 -- tolerance of ~0.75 cell collapses a staircase into straight runs
 -- (the largest a 16m stair-step can deviate from its diagonal is ~11m)
 -- while still keeping real features like a one-cell notch (16m deep).
+-- Real, confirmed live: 12m was TOO aggressive -- polygons visibly cut
+-- corners and drifted off the actual forest edge ("simplifying too
+-- much"). 6m (~0.4 cell) still merges straight/collinear runs but
+-- keeps single-cell steps, so the outline follows the classified cells.
 -- Closed-loop wrapper around the existing open-polyline simplifyBoundary
 -- (which has a real prior divide-by-zero history, so reused rather than
 -- rewritten): split at the vertex farthest from vertex 1 so neither half
 -- gets a near-degenerate baseline, simplify each half, rejoin without
 -- duplicated endpoints (open-ring convention, same as every loop here).
-WailaTrailTracer.FOREST_SIMPLIFY_TOLERANCE = 12.0
+WailaTrailTracer.FOREST_SIMPLIFY_TOLERANCE = 6.0
 
 local function simplifyClosedLoop(loop, tolerance)
     local n = #loop
@@ -3415,7 +3477,7 @@ function WailaTrailTracer.buildForestOverlay(x, z)
     local size = math.ceil((maxX - minX) / cellSize)
 
     local startTime = getTimeSec()
-    local grid, originX, originZ, gridSize = rasterizeForestRegion(minX, minZ, maxX, maxZ, cellSize)
+    local grid, originX, originZ, gridSize = rasterizeForestWindow(minX, minZ, size, WailaTrailTracer.FOREST_HALO_CELLS, cellSize)
     local polygons, cellCount = traceForestPolygonsFromGrid(grid, originX, originZ, gridSize, cellSize)
 
     WailaTrailTracer.buildForestOverlayIncremental(polygons, true)
@@ -3490,6 +3552,8 @@ function WailaTrailTracer.startWholeMapScan()
         return
     end
 
+    WailaTrailTracer.resetForestCellCache()
+
     local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
     local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
     local chunksPerSide = math.ceil(terrainSize / chunkSize)
@@ -3534,7 +3598,7 @@ function WailaTrailTracer.tickWholeMapScan()
     local minX, minZ = state.originX + state.col * state.chunkSize, state.originZ + state.row * state.chunkSize
     local maxX, maxZ = minX + state.chunkSize, minZ + state.chunkSize
 
-    local forestGrid, forestOriginX, forestOriginZ, forestSize = rasterizeForestRegion(minX, minZ, maxX, maxZ, WailaTrailTracer.FOREST_CELL_SIZE)
+    local forestGrid, forestOriginX, forestOriginZ, forestSize = rasterizeForestWindow(minX, minZ, math.ceil(state.chunkSize / WailaTrailTracer.FOREST_CELL_SIZE), WailaTrailTracer.FOREST_HALO_CELLS, WailaTrailTracer.FOREST_CELL_SIZE)
     currentChunkForestGrid = forestGrid
     currentChunkForestOriginX = forestOriginX
     currentChunkForestOriginZ = forestOriginZ
