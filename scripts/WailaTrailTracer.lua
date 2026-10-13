@@ -1699,6 +1699,13 @@ function WailaTrailTracer.getLayerClassOfFingerprint(text)
     return layerClassByKey[layerKey(tonumber(r), tonumber(g), tonumber(b), tonumber(w))]
 end
 
+-- One terrain read, both answers: the learned class (nil = open ground,
+-- details, ...) and the position's material id.
+function WailaTrailTracer.getLayerCellAt(x, z)
+    local r, g, b, w, materialId = getTerrainAttributesAtWorldPos(g_terrainNode, x, 0, z, true, true, true, true, false)
+    return layerClassByKey[layerKey(r, g, b, w)], materialId
+end
+
 -- One terrain read. nil = not a learned class (open ground, details, ...).
 function WailaTrailTracer.getLayerClassAt(x, z)
     local r, g, b, w = getTerrainAttributesAtWorldPos(g_terrainNode, x, 0, z, true, true, true, true, false)

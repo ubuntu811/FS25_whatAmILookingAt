@@ -2,13 +2,16 @@
     WailaLayerScan.lua
 
     Whole-map scan driven by the learned terrain-layer classes
-    (WailaTrailTracer.learnLayerClasses): ONE terrain read per cell says
-    road / forest-floor / neither, and everything else follows from shape.
+    (WailaTrailTracer.learnLayerClasses): ONE terrain read per cell gives the
+    layer class (road / forest-floor / neither) and the material id, and the
+    rest follows from shape.
 
       forest  = the thick parts of the forest-floor-layer mask (what survives
                 a morphological opening)
-      trail   = the thin remainder of that same mask -- IW wear shares the
-                forest-floor layer, but it is a line where forest is an area
+      trail   = worn ground: dirt or gravel material outside the road layer
+                and the forest area, plus the thin remainder of the forest-floor
+                mask. IW wear fragments in the layer signal (wear intensity
+                varies along a path) but its material id is continuous.
       road    = the road layer, found by a 1m pass in chunks that have any
 
     Replaces the window forest classifier, the 1m border refinement and the 1m
@@ -32,6 +35,10 @@ WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS = 25
 WailaTrailTracer.LAYER_SCAN_MIN_THIN_CELLS = 6
 WailaTrailTracer.LAYER_SCAN_FOREST_TOLERANCE = 2.0
 WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE = 1.0
+-- materials that mean worn ground outside the learned classes (DIRT, GRAVEL)
+local WORN_MATERIALS = { [1] = true, [6] = true }
+-- closing radius that joins gaps in a worn path
+WailaTrailTracer.LAYER_SCAN_TRAIL_CLOSE_RADIUS = 1
 
 -- shared empty "protected" grid for the component cleaner (nothing is protected)
 local noProtectedRows = setmetatable({}, { __index = function() return {} end })
@@ -40,38 +47,54 @@ local function log(formatString, ...)
     Logging.info("[WhatAmILookingAt] [LayerScan] " .. formatString, ...)
 end
 
--- dilate by radius cells with a square kernel (separable, edge cells skipped)
-local function dilateMask(mask, n, radius)
-    local function pass(source, horizontal)
-        local result = {}
-        for a = 0, n - 1 do
-            result[a] = {}
-        end
-        for a = 0, n - 1 do
-            for b = 0, n - 1 do
-                local value = false
-                for k = math.max(0, b - radius), math.min(n - 1, b + radius) do
-                    local cell
-                    if horizontal then
-                        cell = source[a][k]
-                    else
-                        cell = source[k][a]
-                    end
-                    if cell then
-                        value = true
-                        break
-                    end
-                end
-                if horizontal then
-                    result[a][b] = value
-                else
-                    result[b][a] = value
-                end
-            end
-        end
-        return result
+-- Square-kernel dilate / erode, separable, with sliding-window counts (one
+-- prefix sum per line). Cells outside the window are skipped, not treated as empty.
+local function filterLine(line, n, radius, dilate)
+    local prefix = { [-1] = 0 }
+    for i = 0, n - 1 do
+        prefix[i] = prefix[i - 1] + (line[i] and 1 or 0)
     end
-    return pass(pass(mask, true), false)
+    local out = {}
+    for i = 0, n - 1 do
+        local lo, hi = math.max(0, i - radius), math.min(n - 1, i + radius)
+        local count = prefix[hi] - prefix[lo - 1]
+        if dilate then
+            out[i] = count > 0
+        else
+            out[i] = count == hi - lo + 1
+        end
+    end
+    return out
+end
+
+local function separableFilter(mask, n, radius, dilate)
+    local rows = {}
+    for row = 0, n - 1 do
+        rows[row] = filterLine(mask[row], n, radius, dilate)
+    end
+    local result = {}
+    for row = 0, n - 1 do
+        result[row] = {}
+    end
+    for col = 0, n - 1 do
+        local column = {}
+        for row = 0, n - 1 do
+            column[row] = rows[row][col]
+        end
+        local filtered = filterLine(column, n, radius, dilate)
+        for row = 0, n - 1 do
+            result[row][col] = filtered[row]
+        end
+    end
+    return result
+end
+
+local function dilateMask(mask, n, radius)
+    return separableFilter(mask, n, radius, true)
+end
+
+local function erodeMask(mask, n, radius)
+    return separableFilter(mask, n, radius, false)
 end
 
 local function newMask(n, value)
@@ -108,7 +131,7 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
     local winX, winZ = minX - halo * cell, minZ - halo * cell
     local half = ((g_currentMission ~= nil and g_currentMission.terrainSize) or 2048) * 0.5
     local roadClass, forestClass = WailaTrailTracer.LAYER_CLASS_ROAD, WailaTrailTracer.LAYER_CLASS_FOREST
-    local classAt = WailaTrailTracer.getLayerClassAt
+    local cellAt = WailaTrailTracer.getLayerCellAt
 
     -- prefilter: every 2nd cell in both axes; most chunks hold nothing
     local anyHit = false
@@ -117,9 +140,12 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
         if z > -half and z < half then
             for col = 0, w - 1, 2 do
                 local x = winX + (col + 0.5) * cell
-                if x > -half and x < half and classAt(x, z) ~= nil then
-                    anyHit = true
-                    break
+                if x > -half and x < half then
+                    local class, materialId = cellAt(x, z)
+                    if class ~= nil or WORN_MATERIALS[materialId] then
+                        anyHit = true
+                        break
+                    end
                 end
             end
         end
@@ -132,56 +158,73 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
     end
 
     -- one terrain read per window cell
-    local forestMask = {}
-    local roadInChunk, forestCells = false, 0
+    local forestMask, wornMask = {}, {}
+    local roadInChunk, forestCells, wornCells = false, 0, 0
     for row = 0, w - 1 do
-        local line = {}
+        local line, wornLine = {}, {}
         local z = winZ + (row + 0.5) * cell
         for col = 0, w - 1 do
             local x = winX + (col + 0.5) * cell
-            local class = nil
+            local class, worn = nil, false
             if x > -half and x < half and z > -half and z < half then
-                class = classAt(x, z)
-                if class == forestClass and FSDensityMapUtil.getFieldDataAtWorldPosition(x, 0, z) then
-                    class = nil
+                local materialId
+                class, materialId = cellAt(x, z)
+                worn = class ~= roadClass and WORN_MATERIALS[materialId] == true
+                if (class == forestClass or worn) and FSDensityMapUtil.getFieldDataAtWorldPosition(x, 0, z) then
+                    class, worn = nil, false
                 end
             end
             line[col] = class == forestClass
+            wornLine[col] = worn
             if class == forestClass then
                 forestCells = forestCells + 1
             elseif class == roadClass and row >= halo and row < halo + n and col >= halo and col < halo + n then
                 roadInChunk = true
             end
+            if worn then
+                wornCells = wornCells + 1
+            end
         end
         forestMask[row] = line
+        wornMask[row] = wornLine
     end
 
     local result = { forest = {}, trail = {}, road = {} }
 
-    if forestCells > 0 then
+    if forestCells > 0 or wornCells > 0 then
         local radius = WailaTrailTracer.LAYER_SCAN_OPEN_RADIUS
-        local area = WailaTrailTracer.openMask(forestMask, w, radius)
-        WailaTrailTracer.cleanComponents(area, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS, WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS)
+        local area = forestMask
+        if forestCells > 0 then
+            area = WailaTrailTracer.openMask(forestMask, w, radius)
+            WailaTrailTracer.cleanComponents(area, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS, WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS)
+        end
 
-        -- thin = forest-layer cells not within `radius` of the cleaned area
+        -- trail = forest-layer cells not within `radius` of the cleaned area (thin
+        -- remainder) + worn material cells clear of the area's edge (same margin, so forest-edge floor patches are not mistaken for a trail)
         local near = dilateMask(area, w, radius)
-        local thin = newMask(w, false)
-        local thinCells = 0
+        local trail = newMask(w, false)
+        local trailCells = 0
         for row = 0, w - 1 do
             for col = 0, w - 1 do
-                if forestMask[row][col] and not near[row][col] then
-                    thin[row][col] = true
-                    thinCells = thinCells + 1
+                if (forestMask[row][col] and not near[row][col]) or (wornMask[row][col] and not near[row][col]) then
+                    trail[row][col] = true
+                    trailCells = trailCells + 1
                 end
             end
         end
-        if thinCells > 0 then
-            WailaTrailTracer.cleanComponents(thin, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_THIN_CELLS, 0)
+        if trailCells > 0 then
+            local closeRadius = WailaTrailTracer.LAYER_SCAN_TRAIL_CLOSE_RADIUS
+            if closeRadius > 0 then
+                trail = erodeMask(dilateMask(trail, w, closeRadius), w, closeRadius)
+            end
+            WailaTrailTracer.cleanComponents(trail, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_THIN_CELLS, 0)
         end
 
-        result.forest = WailaTrailTracer.traceMaskPolygons(cropInner(area, halo, n), minX, minZ, n, cell, WailaTrailTracer.LAYER_SCAN_FOREST_TOLERANCE)
-        if thinCells > 0 then
-            result.trail = WailaTrailTracer.traceMaskPolygons(cropInner(thin, halo, n), minX, minZ, n, cell, WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE)
+        if forestCells > 0 then
+            result.forest = WailaTrailTracer.traceMaskPolygons(cropInner(area, halo, n), minX, minZ, n, cell, WailaTrailTracer.LAYER_SCAN_FOREST_TOLERANCE)
+        end
+        if trailCells > 0 then
+            result.trail = WailaTrailTracer.traceMaskPolygons(cropInner(trail, halo, n), minX, minZ, n, cell, WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE)
         end
     end
 
