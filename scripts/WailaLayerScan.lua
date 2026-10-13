@@ -323,6 +323,7 @@ function WailaTrailTracer.tickLayerScanStep(state)
         return false
     end
 
+    WailaTrailTracer.linkTrailFragments()
     WailaTrailTracer.buildTestOverlay({}, true)
     WailaTrailTracer.buildForestOverlayIncremental({}, true)
     WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
@@ -333,4 +334,147 @@ function WailaTrailTracer.tickLayerScanStep(state)
     log("layer scan cost: %.0fms of scan work (worst chunk %.0fms), %.1fs wall", stats.totalMs, stats.maxMs, elapsedMs / 1000)
     WailaTrailTracer.wholeMapScanState = nil
     return true
+end
+
+-- ===== Linking worn-path fragments =====
+-- Real finding (IW path in open grass): the terrain only carries the wear where
+-- it is heavy, so a long path arrives as separate dashes with unpainted gaps.
+-- A map maker would draw it as one line. Two elongated fragments are one path
+-- if the end of one points at the end of the other across a short gap: close
+-- enough, and both fragment axes lined up with the gap direction. The link is a
+-- narrow ribbon between the two ends, so the result reads as a path with worn
+-- spots rather than a solid road.
+WailaTrailTracer.LINK_MAX_GAP = 40.0
+WailaTrailTracer.LINK_MAX_ANGLE_DEG = 25
+WailaTrailTracer.LINK_MIN_LENGTH = 6.0
+WailaTrailTracer.LINK_MIN_ELONGATION = 2.0
+WailaTrailTracer.LINK_MAX_WIDTH = 12.0
+WailaTrailTracer.LINK_WIDTH_FACTOR = 0.5
+WailaTrailTracer.LINK_MIN_WIDTH = 1.5
+WailaTrailTracer.LINK_REGION_KEY = "links"
+
+-- PCA axis of a polygon's vertices -> centre line ends, or nil if it is not an
+-- elongated fragment.
+local function fragmentEnds(polygon)
+    local count = #polygon
+    if count < 3 then
+        return nil
+    end
+    local cx, cz = 0, 0
+    for _, point in ipairs(polygon) do
+        cx, cz = cx + point[1], cz + point[2]
+    end
+    cx, cz = cx / count, cz / count
+    local sxx, sxz, szz = 0, 0, 0
+    for _, point in ipairs(polygon) do
+        local dx, dz = point[1] - cx, point[2] - cz
+        sxx, sxz, szz = sxx + dx * dx, sxz + dx * dz, szz + dz * dz
+    end
+    local angle = 0.5 * math.atan2(2 * sxz, sxx - szz)
+    local ux, uz = math.cos(angle), math.sin(angle)
+    local minAlong, maxAlong, minAcross, maxAcross = math.huge, -math.huge, math.huge, -math.huge
+    for _, point in ipairs(polygon) do
+        local dx, dz = point[1] - cx, point[2] - cz
+        local along = dx * ux + dz * uz
+        local across = -dx * uz + dz * ux
+        minAlong, maxAlong = math.min(minAlong, along), math.max(maxAlong, along)
+        minAcross, maxAcross = math.min(minAcross, across), math.max(maxAcross, across)
+    end
+    local length, width = maxAlong - minAlong, maxAcross - minAcross
+    if length < WailaTrailTracer.LINK_MIN_LENGTH or width > WailaTrailTracer.LINK_MAX_WIDTH
+        or length < WailaTrailTracer.LINK_MIN_ELONGATION * math.max(width, 1.0) then
+        return nil
+    end
+    local midAcross = (minAcross + maxAcross) * 0.5
+    local function at(along)
+        return cx + ux * along - uz * midAcross, cz + uz * along + ux * midAcross
+    end
+    local ax, az = at(minAlong)
+    local bx, bz = at(maxAlong)
+    return { { ax, az, -ux, -uz }, { bx, bz, ux, uz } }, math.max(width, WailaTrailTracer.LINK_MIN_WIDTH)
+end
+
+-- Returns the number of links made. Reads every stored trail polygon (the
+-- gravel slot of savedRegionsByMaterial), stores the bridge ribbons under
+-- LINK_REGION_KEY and draws them.
+function WailaTrailTracer.linkTrailFragments()
+    local startTime = getTimeSec()
+    local store = WailaTrailTracer.savedRegionsByMaterial[6]
+    local ends, widths = {}, {}
+    local fragments = 0
+    for key, polygons in pairs(store) do
+        if key ~= WailaTrailTracer.LINK_REGION_KEY then
+            for _, polygon in ipairs(polygons) do
+                local polygonEnds, width = fragmentEnds(polygon)
+                if polygonEnds ~= nil then
+                    fragments = fragments + 1
+                    for _, endPoint in ipairs(polygonEnds) do
+                        endPoint.fragment, endPoint.width = fragments, width
+                        ends[#ends + 1] = endPoint
+                    end
+                end
+            end
+        end
+    end
+
+    local maxGap = WailaTrailTracer.LINK_MAX_GAP
+    local cosLimit = math.cos(math.rad(WailaTrailTracer.LINK_MAX_ANGLE_DEG))
+    local bucketSize = maxGap
+    local buckets = {}
+    local function bucketKey(x, z)
+        return math.floor(x / bucketSize) * 100003 + math.floor(z / bucketSize)
+    end
+    for index, endPoint in ipairs(ends) do
+        local key = bucketKey(endPoint[1], endPoint[2])
+        buckets[key] = buckets[key] or {}
+        table.insert(buckets[key], index)
+    end
+
+    -- best partner per end: nearest end ahead of this one, facing back at it
+    local best = {}
+    for index, a in ipairs(ends) do
+        local bestIndex, bestDistance = nil, maxGap
+        for dx = -1, 1 do
+            for dz = -1, 1 do
+                local key = (math.floor(a[1] / bucketSize) + dx) * 100003 + math.floor(a[2] / bucketSize) + dz
+                for _, otherIndex in ipairs(buckets[key] or {}) do
+                    local b = ends[otherIndex]
+                    if b.fragment ~= a.fragment then
+                        local vx, vz = b[1] - a[1], b[2] - a[2]
+                        local distance = math.sqrt(vx * vx + vz * vz)
+                        if distance < bestDistance and distance > 0.01 then
+                            local ahead = (vx * a[3] + vz * a[4]) / distance
+                            local facing = -(vx * b[3] + vz * b[4]) / distance
+                            if ahead >= cosLimit and facing >= cosLimit then
+                                bestIndex, bestDistance = otherIndex, distance
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        best[index] = bestIndex
+    end
+
+    local bridges = {}
+    for index, otherIndex in pairs(best) do
+        if otherIndex ~= nil and best[otherIndex] == index and index < otherIndex then
+            local a, b = ends[index], ends[otherIndex]
+            local vx, vz = b[1] - a[1], b[2] - a[2]
+            local distance = math.sqrt(vx * vx + vz * vz)
+            local halfWidth = math.max(WailaTrailTracer.LINK_MIN_WIDTH, math.min(a.width, b.width) * WailaTrailTracer.LINK_WIDTH_FACTOR) * 0.5
+            local nx, nz = -vz / distance * halfWidth, vx / distance * halfWidth
+            bridges[#bridges + 1] = {
+                { a[1] + nx, a[2] + nz }, { b[1] + nx, b[2] + nz },
+                { b[1] - nx, b[2] - nz }, { a[1] - nx, a[2] - nz },
+            }
+        end
+    end
+
+    store[WailaTrailTracer.LINK_REGION_KEY] = #bridges > 0 and bridges or nil
+    if #bridges > 0 then
+        WailaTrailTracer.buildTestOverlay({ [6] = bridges }, true)
+    end
+    log("linkTrailFragments: %d elongated fragment(s), %d link(s) within %.0fm, %.0fms", fragments, #bridges, maxGap, (getTimeSec() - startTime) * 1000)
+    return #bridges
 end
