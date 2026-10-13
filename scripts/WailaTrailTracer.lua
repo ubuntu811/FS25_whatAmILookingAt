@@ -98,13 +98,13 @@ end
 --      instead of duplicating it -- required anyway for the planned
 --      periodic/vehicle-triggered rescans, which by design will
 --      re-touch the same ground repeatedly.
---   2) stores the RAW (pre-Chaikin) loops, not the smoothed polygons --
---      3 smoothing iterations at 2 new points/edge inflate point count
---      ~8x (see SMOOTH_ITERATIONS), and that's what's actually written
---      to XML/serialized, not just held in memory. Re-smoothed once at
---      load time instead (see tickLoadFromXML) -- cheap, pure in-memory
---      vector math, no XML/native cost.
--- Each savedRegionsByMaterial[materialId] is { [regionKey] = rawLoops }.
+--   2) stores the FINAL polygons -- Bezier curve-fit outlines of ~10
+--      points, same as forest. This used to store raw 1m loops and
+--      Chaikin-smooth them on load (x8 points): 7,792 trail polygons /
+--      152k raw points became ~1.2M points through the engine, which is
+--      what made a restore take 113-214s (measured). Old saves hold raw
+--      loops and load as staircases until the next scan.
+-- Each savedRegionsByMaterial[materialId] is { [regionKey] = polygons }.
 WailaTrailTracer.savedRegionsByMaterial = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} }
 
 -- Real design choice: persists the POLYGON data, not the raw bit-vector
@@ -118,7 +118,7 @@ WailaTrailTracer.savedRegionsByMaterial = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAV
 -- smaller to write/read than a full map dump would be.
 WailaTrailTracer.SAVEGAME_FILENAME = "wailaTrail.xml"
 
--- Records one scan's freshly-produced RAW (pre-smoothing) polygons under
+-- Records one scan's freshly-produced polygons under
 -- their region's key, replacing whatever was there before for that exact
 -- region. Called from scanTileCells itself (not each individual caller)
 -- so every present AND future scan path (whole-map ticks, single-tile
@@ -140,10 +140,10 @@ function WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, polygons)
     WailaTrailTracer.savedForestRegions[regionKey] = #polygons > 0 and polygons or nil
 end
 
-function WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, rawPolygonsByMaterial)
+function WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, polygonsByMaterial)
     local regionKey = string.format("%.1f_%.1f_%.1f_%.1f", minX, minZ, maxX, maxZ)
     for _, materialId in ipairs(SPLIT_MATERIALS) do
-        WailaTrailTracer.savedRegionsByMaterial[materialId][regionKey] = rawPolygonsByMaterial[materialId] or {}
+        WailaTrailTracer.savedRegionsByMaterial[materialId][regionKey] = polygonsByMaterial[materialId] or {}
     end
 end
 
@@ -978,10 +978,9 @@ function WailaTrailTracer.scanTileCells(minX, minZ, maxX, maxZ, cellSize)
         segments = {},
         polygonsByMaterial = {},
     }
-    -- Raw (pre-Chaikin) loops per material, kept alongside the smoothed
-    -- polygons purely for recordScannedPolygons -- see its own header for
-    -- why persistence wants the raw, un-inflated point count instead.
-    local rawPolygonsByMaterial = {}
+    -- Tile bounds: vertices on them are fixed in the curve fit, so a
+    -- trail cut at a chunk seam stays straight there.
+    local bounds = { minX = minX, minZ = minZ, maxX = maxX, maxZ = maxZ }
 
     -- Real request ("300k little shapes... maybe simplify the
     -- structures"): closeGrid (dilate then erode -- already built,
@@ -1011,16 +1010,16 @@ function WailaTrailTracer.scanTileCells(minX, minZ, maxX, maxZ, cellSize)
             table.insert(result.segments, segment)
         end
 
-        local rawLoops = WailaTrailTracer.chainBorderLoops(materialResult.segments)
+        -- Bezier curve fit (same as forest): smooth AND few points. A loop
+        -- too small to fit keeps its raw corners, which is already few.
         local polygons = {}
-        for _, loop in ipairs(rawLoops) do
-            table.insert(polygons, WailaTrailTracer.smoothClosedLoop(loop))
+        for _, loop in ipairs(WailaTrailTracer.chainBorderLoops(materialResult.segments)) do
+            table.insert(polygons, WailaTrailTracer.fitLoopCurves(loop, bounds, WailaTrailTracer.TRAIL_CURVE_TOLERANCE) or loop)
         end
         result.polygonsByMaterial[materialId] = polygons
-        rawPolygonsByMaterial[materialId] = rawLoops
     end
 
-    WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, rawPolygonsByMaterial)
+    WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, result.polygonsByMaterial)
 
     return result
 end
@@ -3108,6 +3107,10 @@ local function fitLoopCurves(loop, bounds, tolerance)
     end
     return out
 end
+-- Used by the 1m trail scan (scanTileCells) too; trail strips are only a few
+-- metres wide, so the tolerance is tighter than the forest outline's.
+WailaTrailTracer.fitLoopCurves = fitLoopCurves
+WailaTrailTracer.TRAIL_CURVE_TOLERANCE = 0.8
 -- ===== end curve fit =====
 
 local curveFitFailureLogged = false
@@ -3982,10 +3985,7 @@ function WailaTrailTracer.tickLoadFromXML()
             if item.isForest then
                 table.insert(state.pendingForest, rawPolygon)
             else
-                -- Persisted as RAW (pre-Chaikin) loops -- re-smoothed
-                -- here, once, before being handed to buildTestOverlay.
-                -- See recordScannedPolygons' own header for why.
-                table.insert(state.pendingByMaterial[item.materialId], WailaTrailTracer.smoothClosedLoop(rawPolygon))
+                table.insert(state.pendingByMaterial[item.materialId], rawPolygon)
             end
             state.polygonCount = state.polygonCount + 1
             pendingCount = pendingCount + 1
