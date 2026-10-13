@@ -158,7 +158,6 @@ function FS25WhatAmILookingAt:setupComponents()
         { label = "Dump road nodes", run = function() mod:onDumpRoadNodes() end },
         { label = "Build road overlay (from real splines)", run = function() mod:onBuildRoadOverlay() end },
         { label = "Build tree/water overlay near player", run = function() mod:onBuildFeatureOverlay() end },
-        { label = "Build diagonal test overlay (simplest possible)", run = function() mod:onBuildDiagonalTestOverlay() end },
         { label = "Build forest overlay near player (diversity classifier)", run = function() mod:onBuildForestOverlay() end },
         { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
         { label = "Learn layer classes (road from splines, forest from classifier)", run = function() WailaTrailTracer.learnLayerClasses() end },
@@ -512,10 +511,6 @@ function FS25WhatAmILookingAt:onBuildRoadOverlay()
     else
         log("[RoadOverlay] failed: %s", tostring(splineCountOrReason))
     end
-end
-
-function FS25WhatAmILookingAt:onBuildDiagonalTestOverlay()
-    WailaTrailTracer.buildDiagonalTestOverlay()
 end
 
 function FS25WhatAmILookingAt:onBuildLayerClassOverlay()
