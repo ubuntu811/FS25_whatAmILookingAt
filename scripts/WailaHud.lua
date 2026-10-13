@@ -512,6 +512,10 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         if terrain ~= nil then
             self:addLine(lines, string.format("Ground: %s [%s]  field=%s  structure=%s", terrain.materialName, tostring(terrain.materialId), WailaUtil.bool(terrain.isOnField), WailaUtil.bool(terrain.isClearOfStructures == false)), true, true)
             self:addLine(lines, string.format("Ground type=%s densityBits=%s depth=%s", WailaUtil.value(terrain.groundType), WailaUtil.value(terrain.densityBits), WailaUtil.value(terrain.depth)))
+            -- Layer fingerprint: the first four returns of getTerrainAttributesAtWorldPos
+            -- (the GIANTS editor scripts match terrain paint by comparing exactly these),
+            -- finer than the ground-type id above -- compare road / path / forest floor.
+            self:addLine(lines, string.format("Layer attrs: r=%.6f g=%.6f b=%.6f w=%.6f", terrain.r or 0, terrain.g or 0, terrain.b or 0, terrain.depth or 0))
         end
 
         local foliagePoint = inspection.foliagePoint or {}
@@ -585,6 +589,60 @@ function WailaHud:draw(inspection, areaSize, areaStep)
                 if index > self.maxFoliageStatsRows then break end
                 self:addLine(lines, string.format("  Foliage %-17s %5.1f%% (%d)", row.name, row.percent, row.count))
             end
+        end
+
+        -- Layer fingerprint histogram (r/g/b/w per sample) + a rough verdict from the
+        -- same 5x5m grid. A heuristic to look at while we find out whether the
+        -- fingerprint separates roads from forest floor on a given map.
+        if inspection.terrainArea ~= nil and inspection.terrainArea.layers ~= nil then
+            for index, row in ipairs(inspection.terrainArea.layers) do
+                if index > 4 then break end
+                self:addLine(lines, string.format("  Layer %s %5.1f%% (%d)", row.name, row.percent, row.count))
+            end
+
+            -- Judged on the GROUND only: foliage is no signal for roads (grass grows
+            -- on and beside real roads -- a 99% road-layer spot with 28% meadow was
+            -- called "meadow-like" by the first version of this verdict).
+            local topMaterial = inspection.terrainArea.materials[1]
+            local topLayer = inspection.terrainArea.layers[1]
+            local verdict
+
+            -- learned classes (road from the splines, forest from the classifier)
+            local roadPercent, forestPercent = 0, 0
+            -- learn once, lazily (about a tenth of a second, one time)
+            if not WailaTrailTracer.layerClassLearned and not WailaTrailTracer.layerClassLearnAttempted
+                and g_currentMission ~= nil and g_currentMission.aiSystem ~= nil then
+                WailaTrailTracer.layerClassLearnAttempted = true
+                WailaTrailTracer.learnLayerClasses()
+            end
+            if WailaTrailTracer.layerClassLearned then
+                for _, row in ipairs(inspection.terrainArea.layers) do
+                    local class = WailaTrailTracer.getLayerClassOfFingerprint(row.name)
+                    if class == WailaTrailTracer.LAYER_CLASS_ROAD then
+                        roadPercent = roadPercent + row.percent
+                    elseif class == WailaTrailTracer.LAYER_CLASS_FOREST then
+                        forestPercent = forestPercent + row.percent
+                    end
+                end
+                self:addLine(lines, string.format("Learned classes: road %.0f%%  forest floor %.0f%%", roadPercent, forestPercent))
+            end
+
+            if inspection.terrainArea.fieldPercent > 50 then
+                verdict = "field"
+            elseif WailaTrailTracer.layerClassLearned and roadPercent >= 60 then
+                verdict = string.format("ROAD (learned layer, %.0f%%)", roadPercent)
+            elseif WailaTrailTracer.layerClassLearned and forestPercent >= 60 then
+                verdict = string.format("FOREST FLOOR (learned layers, %.0f%%)", forestPercent)
+            elseif topMaterial ~= nil and topMaterial.name == "GRASS" and topMaterial.percent >= 60 then
+                verdict = "grass ground (meadow / verge-like)"
+            elseif topMaterial ~= nil and topMaterial.percent >= 90 and topLayer ~= nil and topLayer.percent >= 90 then
+                verdict = string.format("single %s layer %.0f%% (road / path / yard-like)", string.lower(topMaterial.name), topLayer.percent)
+            elseif topMaterial ~= nil and topMaterial.percent >= 90 then
+                verdict = string.format("%s, several layers (worn / mixed surface)", string.lower(topMaterial.name))
+            else
+                verdict = "mixed ground (forest / worn / verge-like)"
+            end
+            self:addLine(lines, "Looks like: " .. verdict, true, true)
         end
     end
 

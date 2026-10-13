@@ -153,17 +153,20 @@ end
 function WailaTerrainInspector:scanArea(centerX, centerZ, size, step)
     local half = size * 0.5
     local materials = {}
+    local layers = {}
     local fieldSamples = 0
     local samples = 0
 
     for x = centerX - half, centerX + half - 0.0001, step do
         for z = centerZ - half, centerZ + half - 0.0001, step do
-            local _, _, _, _, materialId = getTerrainAttributesAtWorldPos(
+            local lr, lg, lb, lw, materialId = getTerrainAttributesAtWorldPos(
                 g_terrainNode, x, 0, z, true, true, true, true, false
             )
             local isOnField = FSDensityMapUtil.getFieldDataAtWorldPosition(x, 0, z)
 
             samples = samples + 1
+            local layerKey = string.format("%.4f/%.4f/%.4f/%.4f", lr or 0, lg or 0, lb or 0, lw or 0)
+            layers[layerKey] = (layers[layerKey] or 0) + 1
             local materialName = WailaTerrain.getMaterialName(materialId)
             materials[materialName] = (materials[materialName] or 0) + 1
             if isOnField then
@@ -172,5 +175,5 @@ function WailaTerrainInspector:scanArea(centerX, centerZ, size, step)
         end
     end
 
-    return WailaTerrainArea.new(samples, WailaUtil.sortedCounts(materials, samples), samples > 0 and fieldSamples / samples * 100 or 0)
+    return WailaTerrainArea.new(samples, WailaUtil.sortedCounts(materials, samples), samples > 0 and fieldSamples / samples * 100 or 0, WailaUtil.sortedCounts(layers, samples))
 end

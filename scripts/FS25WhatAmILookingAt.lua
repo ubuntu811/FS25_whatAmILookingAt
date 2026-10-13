@@ -160,6 +160,12 @@ function FS25WhatAmILookingAt:setupComponents()
         { label = "Build tree/water overlay near player", run = function() mod:onBuildFeatureOverlay() end },
         { label = "Build diagonal test overlay (simplest possible)", run = function() mod:onBuildDiagonalTestOverlay() end },
         { label = "Build forest overlay near player (diversity classifier)", run = function() mod:onBuildForestOverlay() end },
+        { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
+        { label = "Learn layer classes (road from splines, forest from classifier)", run = function() WailaTrailTracer.learnLayerClasses() end },
+        { label = "Build layer-class overlay near player (road orange, forest green)", run = function() mod:onBuildLayerClassOverlay() end },
+        { label = "Rescan ROAD LAYER only (whole map, about a minute)", run = function() WailaTrailTracer.startRoadLayerOnlyScan() end },
+        { label = "TOGGLE overlay debug colours (loud, distinct per layer)", run = function() WailaTrailTracer.toggleDebugColors() end },
+        { label = "Build layer+material PAIR overlay near player (top 7 colour-coded, legend in log)", run = function() mod:onBuildLayerPairOverlay() end },
     })
 
     registerActionTab("foliage", "Foliage", {
@@ -510,6 +516,36 @@ end
 
 function FS25WhatAmILookingAt:onBuildDiagonalTestOverlay()
     WailaTrailTracer.buildDiagonalTestOverlay()
+end
+
+function FS25WhatAmILookingAt:onBuildLayerClassOverlay()
+    local x, z
+    if self.current ~= nil and self.current.hit ~= nil then
+        x, z = self.current.hit.x, self.current.hit.z
+    elseif g_localPlayer ~= nil and g_localPlayer.getPosition ~= nil then
+        local px, _, pz = g_localPlayer:getPosition()
+        x, z = px, pz
+    end
+    if x == nil then
+        log("[LayerClassOverlay] no target or player position")
+        return
+    end
+    WailaTrailTracer.buildLayerClassOverlay(x, z)
+end
+
+function FS25WhatAmILookingAt:onBuildLayerPairOverlay()
+    local x, z
+    if self.current ~= nil and self.current.hit ~= nil then
+        x, z = self.current.hit.x, self.current.hit.z
+    elseif g_localPlayer ~= nil and g_localPlayer.getPosition ~= nil then
+        local px, _, pz = g_localPlayer:getPosition()
+        x, z = px, pz
+    end
+    if x == nil then
+        log("[LayerPairOverlay] no target or player position")
+        return
+    end
+    WailaTrailTracer.buildLayerPairOverlay(x, z)
 end
 
 function FS25WhatAmILookingAt:onBuildForestOverlay()

@@ -12,12 +12,15 @@ WailaTerrainArea = {}
 local WailaTerrainArea_mt = Class(WailaTerrainArea)
 
 -- materials: WailaUtil.sortedCounts() output -- {{name, count, percent}, ...}
-function WailaTerrainArea.new(sampleCount, materials, fieldPercent)
+-- layers: same shape, keyed by the layer fingerprint "r/g/b/w" (first four returns of
+-- getTerrainAttributesAtWorldPos) -- finer than the material bucket.
+function WailaTerrainArea.new(sampleCount, materials, fieldPercent, layers)
     local self = setmetatable({}, WailaTerrainArea_mt)
 
     self.sampleCount = sampleCount
     self.materials = materials
     self.fieldPercent = fieldPercent
+    self.layers = layers or {}
 
     return self
 end
@@ -27,6 +30,7 @@ function WailaTerrainArea:toTable()
         sampleCount = self.sampleCount,
         materials = self.materials,
         fieldPercent = self.fieldPercent,
+        layers = self.layers,
     }
 end
 

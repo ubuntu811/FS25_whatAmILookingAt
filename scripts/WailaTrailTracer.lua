@@ -87,6 +87,25 @@ local MATERIAL_COLOR = {
     [MATERIAL_GRAVEL] = { 0.6, 0.55, 0.45 },
     [MATERIAL_STONE] = { 0.2, 0.5, 0.2 },
 }
+-- Debug colour mode (debug hub toggle): every layer gets a loud, distinct
+-- colour so overlays can be told apart at a glance. Normal colours stay
+-- the tasteful defaults.
+local MATERIAL_COLOR_DEBUG = {
+    [MATERIAL_DIRT] = { 1.0, 1.0, 0.0 },
+    [MATERIAL_GRAVEL] = { 1.0, 0.5, 0.0 },
+    [MATERIAL_STONE] = { 0.0, 1.0, 1.0 },
+}
+WailaTrailTracer.debugColors = false
+WailaTrailTracer.PALETTE = {
+    normal = { forest = { 0.02, 0.2, 0.04 }, road = { 0.12, 0.12, 0.12 }, spline = { 0.25, 0.25, 0.25 } },
+    debug = { forest = { 0.2, 1.0, 0.2 }, road = { 1.0, 0.4, 0.0 }, spline = { 0.7, 0.2, 1.0 } },
+}
+local function paletteColor(name)
+    return WailaTrailTracer.PALETTE[WailaTrailTracer.debugColors and "debug" or "normal"][name]
+end
+local function materialColor(materialId)
+    return (WailaTrailTracer.debugColors and MATERIAL_COLOR_DEBUG or MATERIAL_COLOR)[materialId]
+end
 
 -- Real, confirmed live bug (229,673 polygons written in one blocking
 -- call froze the game -- same class of mistake as the earlier whole-map-
@@ -2715,7 +2734,7 @@ function WailaTrailTracer.buildTestOverlay(polygonsByMaterial, forceRegenerate)
     -- with its own MATERIAL_VALUE and MATERIAL_COLOR.
     resetDensityMapVisualizationOverlay(WailaTrailTracer.testOverlay)
     for _, materialId in ipairs(SPLIT_MATERIALS) do
-        local color = MATERIAL_COLOR[materialId]
+        local color = materialColor(materialId)
         setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.testOverlay, map, 0, 0, 0, numChannels, MATERIAL_VALUE[materialId], color[1], color[2], color[3])
     end
     generateDensityMapVisualizationOverlay(WailaTrailTracer.testOverlay)
@@ -2925,7 +2944,8 @@ function WailaTrailTracer.buildRoadSplineOverlay()
     -- visible roads on the map -- still distinct from the trail
     -- overlay's gray/tan/green and the forest overlay's saturated green.
     resetDensityMapVisualizationOverlay(WailaTrailTracer.roadOverlay)
-    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.roadOverlay, map, 0, 0, 0, 1, 1, 0.25, 0.25, 0.25)
+    local splineColor = paletteColor("spline")
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.roadOverlay, map, 0, 0, 0, 1, 1, splineColor[1], splineColor[2], splineColor[3])
     generateDensityMapVisualizationOverlay(WailaTrailTracer.roadOverlay)
 
     local elapsedMs = (getTimeSec() - startTime) * 1000
@@ -3121,6 +3141,12 @@ WailaTrailTracer.FOREST_SAMPLES_PER_AXIS = 3
 -- this threshold's.
 WailaTrailTracer.FOREST_MIN_DIVERSITY = 2
 WailaTrailTracer.FOREST_MAX_DOMINANT_FRACTION = 0.75
+-- Real request ("dirt + stone = forest, only dirt = dirt"): a factory
+-- yard of dirt mixed with a lighter surface read as forest on diversity
+-- alone. Forest floor on this map has STONE under it; require at least
+-- one stone sample (nil = off, i.e. any two materials). Per-map taste --
+-- see the per-map tuning note: this is a default, not a truth.
+WailaTrailTracer.FOREST_REQUIRED_MATERIAL = MATERIAL_STONE
 
 local FOREST_TRACKED_MATERIALS = { MATERIAL_DIRT, MATERIAL_GRAVEL, MATERIAL_STONE }
 
@@ -3152,7 +3178,7 @@ local function classifyForestCell(cellMinX, cellMinZ, cellSize, samplesPerAxis)
             local sampleX = cellMinX + (i + 0.5) * step
             local sampleZ = cellMinZ + (j + 0.5) * step
             if FSDensityMapUtil.getFieldDataAtWorldPosition(sampleX, 0, sampleZ) then
-                return false, true
+                return false, true, false
             end
             -- Real, confirmed live gap: this classifier had zero road
             -- awareness -- a coarse cell straddling or running alongside
@@ -3166,7 +3192,7 @@ local function classifyForestCell(cellMinX, cellMinZ, cellSize, samplesPerAxis)
             -- forest, same "any sample disqualifies the whole cell"
             -- conservatism the field check above already uses.
             if isNearRealRoad(sampleX, sampleZ) then
-                return false, true
+                return false, true, true
             end
             local _, _, _, _, materialId = getTerrainAttributesAtWorldPos(g_terrainNode, sampleX, 0, sampleZ, true, true, true, true, false)
             counts[materialId] = (counts[materialId] or 0) + 1
@@ -3175,7 +3201,7 @@ local function classifyForestCell(cellMinX, cellMinZ, cellSize, samplesPerAxis)
     end
 
     if totalSamples == 0 then
-        return false, false
+        return false, false, false
     end
 
     local diversity = 0
@@ -3190,6 +3216,11 @@ local function classifyForestCell(cellMinX, cellMinZ, cellSize, samplesPerAxis)
         end
     end
 
+    local requiredMaterial = WailaTrailTracer.FOREST_REQUIRED_MATERIAL
+    if requiredMaterial ~= nil and (counts[requiredMaterial] or 0) == 0 then
+        return false, false, false
+    end
+
     local dominantFraction = maxCount / totalSamples
     -- Real, confirmed live regression (reverted, see git history/session
     -- notes): a tree-presence requirement was tried here to rule out a
@@ -3199,7 +3230,7 @@ local function classifyForestCell(cellMinX, cellMinZ, cellSize, samplesPerAxis)
     -- header-flagged assumption ("canopy has no real collision") doesn't
     -- hold on this map's tree assets. Material diversity + the min-size
     -- filter is the committable baseline; the quarry problem stays open.
-    return diversity >= WailaTrailTracer.FOREST_MIN_DIVERSITY and dominantFraction < WailaTrailTracer.FOREST_MAX_DOMINANT_FRACTION, false
+    return diversity >= WailaTrailTracer.FOREST_MIN_DIVERSITY and dominantFraction < WailaTrailTracer.FOREST_MAX_DOMINANT_FRACTION, false, false
 end
 
 -- Border-pass variant (centre x/z + window size). The coarse version
@@ -3250,7 +3281,333 @@ local function classifyForestCellFine(centerX, centerZ, windowSize, samplesPerAx
             maxCount = count
         end
     end
+    local requiredMaterial = WailaTrailTracer.FOREST_REQUIRED_MATERIAL
+    if requiredMaterial ~= nil and (counts[requiredMaterial] or 0) == 0 then
+        return false, false
+    end
     return diversity >= WailaTrailTracer.FOREST_MIN_DIVERSITY and maxCount / totalSamples < WailaTrailTracer.FOREST_MAX_DOMINANT_FRACTION, false
+end
+
+-- Debug survey: which terrain layer fingerprints (r/g/b/w, the first four
+-- returns of getTerrainAttributesAtWorldPos) exist on this map, and where
+-- they occur -- inside forest-classified cells, in protected (road/field
+-- margin) cells, or in plain open ground. Answers "does forest floor ever
+-- share the road layer's fingerprint?" without standing in forests by hand.
+-- Samples the centre of every 2nd coarse cell in each axis (~4k cells, ~40k
+-- terrain reads) -- a one-shot debug action, not part of any scan.
+function WailaTrailTracer.logLayerFingerprintSurvey()
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local worldMin = -terrainSize * 0.5
+    local cell = WailaTrailTracer.FOREST_CELL_SIZE
+    local cells = math.floor(terrainSize / cell)
+    local startTime = getTimeSec()
+    local stats, total, skippedFields = {}, 0, 0
+
+    for gx = 1, cells - 1, 2 do
+        for gz = 1, cells - 1, 2 do
+            local minX, minZ = worldMin + gx * cell, worldMin + gz * cell
+            local cx, cz = minX + cell * 0.5, minZ + cell * 0.5
+            if FSDensityMapUtil.getFieldDataAtWorldPosition(cx, 0, cz) then
+                skippedFields = skippedFields + 1
+            else
+                local isForest, isProtected = classifyForestCell(minX, minZ, cell, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
+                local r, g, b, w, materialId = getTerrainAttributesAtWorldPos(g_terrainNode, cx, 0, cz, true, true, true, true, false)
+                local key = string.format("%.4f/%.4f/%.4f/%.4f", r or 0, g or 0, b or 0, w or 0)
+                local entry = stats[key]
+                if entry == nil then
+                    entry = { count = 0, forest = 0, protected = 0, material = materialId }
+                    stats[key] = entry
+                end
+                entry.count = entry.count + 1
+                if isForest then
+                    entry.forest = entry.forest + 1
+                elseif isProtected then
+                    entry.protected = entry.protected + 1
+                end
+                total = total + 1
+            end
+        end
+    end
+
+    local rows = {}
+    for key, entry in pairs(stats) do
+        rows[#rows + 1] = { key = key, entry = entry }
+    end
+    table.sort(rows, function(a, b) return a.entry.count > b.entry.count end)
+
+    log("LayerSurvey: %d cell centre(s) sampled (%d on fields skipped), %d distinct layer fingerprint(s), %.0fms",
+        total, skippedFields, #rows, (getTimeSec() - startTime) * 1000)
+    log("LayerSurvey: fingerprint r/g/b/w | material | cells | %% in forest cells | %% in road/field-margin cells")
+    for index = 1, math.min(30, #rows) do
+        local entry = rows[index].entry
+        log("LayerSurvey: %s | %s [%s] | %d | %.0f%% | %.0f%%", rows[index].key, WailaTerrain.getMaterialName(entry.material), tostring(entry.material),
+            entry.count, entry.forest / entry.count * 100, entry.protected / entry.count * 100)
+    end
+end
+
+-- ===== Learned terrain-layer classes =====
+-- Real finding (layer survey on CreativeHorizon): the first four returns
+-- of getTerrainAttributesAtWorldPos (r/g/b/w) name the dominant paint
+-- LAYER exactly, while the material id attached to the same layer varies
+-- by position (the forest-floor layer read GRASS, GRAVEL and DIRT in
+-- different places). The road layer was 100% distinct from forest floor
+-- and from open grass, and rare (~2% of the map). So instead of
+-- material statistics + thresholds, each map TEACHES the classes:
+--   road   = layers common along the aiSystem road splines (ground
+--            truth) but rare on the whole map
+--   forest = layers that are mostly inside cells the older statistical
+--            classifier calls forest (bootstrap)
+-- One terrain read per cell then classifies it -- no windows, no jitter.
+WailaTrailTracer.LAYER_LEARN_MIN_SPLINE_SHARE = 0.25
+WailaTrailTracer.LAYER_LEARN_MAX_MAP_SHARE = 0.10
+WailaTrailTracer.LAYER_LEARN_MIN_FOREST_SHARE = 0.60
+WailaTrailTracer.LAYER_LEARN_MIN_FOREST_CELLS = 8
+WailaTrailTracer.LAYER_CLASS_ROAD = 1
+WailaTrailTracer.LAYER_CLASS_FOREST = 2
+WailaTrailTracer.layerClassLearned = false
+local layerClassByKey = {}
+
+local function layerKey(r, g, b, w)
+    return math.floor((r or 0) * 1000 + 0.5) * 1000000000 + math.floor((g or 0) * 1000 + 0.5) * 1000000
+        + math.floor((b or 0) * 1000 + 0.5) * 1000 + math.floor((w or 0) * 1000 + 0.5)
+end
+
+local function layerKeyToString(key)
+    local w = key % 1000
+    local b = math.floor(key / 1000) % 1000
+    local g = math.floor(key / 1000000) % 1000
+    local r = math.floor(key / 1000000000)
+    return string.format("%.4f/%.4f/%.4f/%.4f", r / 1000, g / 1000, b / 1000, w / 1000)
+end
+
+-- "0.1570/0.1410/0.1220/0.0000" (the HUD's fingerprint text) -> class or nil
+function WailaTrailTracer.getLayerClassOfFingerprint(text)
+    local r, g, b, w = string.match(text or "", "^([%d%.]+)/([%d%.]+)/([%d%.]+)/([%d%.]+)$")
+    if r == nil then
+        return nil
+    end
+    return layerClassByKey[layerKey(tonumber(r), tonumber(g), tonumber(b), tonumber(w))]
+end
+
+-- One terrain read. nil = not a learned class (open ground, details, ...).
+function WailaTrailTracer.getLayerClassAt(x, z)
+    local r, g, b, w = getTerrainAttributesAtWorldPos(g_terrainNode, x, 0, z, true, true, true, true, false)
+    return layerClassByKey[layerKey(r, g, b, w)]
+end
+
+function WailaTrailTracer.learnLayerClasses()
+    local startTime = getTimeSec()
+    layerClassByKey = {}
+    WailaTrailTracer.layerClassLearned = false
+
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local worldMin = -terrainSize * 0.5
+    local cell = WailaTrailTracer.FOREST_CELL_SIZE
+    local cells = math.floor(terrainSize / cell)
+
+    -- whole-map layer shares + forest association, every 4th coarse cell per axis
+    local mapCounts, forestCounts, mapTotal = {}, {}, 0
+    for gx = 1, cells - 1, 4 do
+        for gz = 1, cells - 1, 4 do
+            local minX, minZ = worldMin + gx * cell, worldMin + gz * cell
+            local cx, cz = minX + cell * 0.5, minZ + cell * 0.5
+            if not FSDensityMapUtil.getFieldDataAtWorldPosition(cx, 0, cz) then
+                local isForest = classifyForestCell(minX, minZ, cell, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
+                local r, g, b, w = getTerrainAttributesAtWorldPos(g_terrainNode, cx, 0, cz, true, true, true, true, false)
+                local key = layerKey(r, g, b, w)
+                mapCounts[key] = (mapCounts[key] or 0) + 1
+                if isForest then
+                    forestCounts[key] = (forestCounts[key] or 0) + 1
+                end
+                mapTotal = mapTotal + 1
+            end
+        end
+    end
+
+    -- ground truth for roads: layers along the real road splines
+    local splineCounts, splineTotal, splineCount = {}, 0, 0
+    if g_currentMission ~= nil and g_currentMission.aiSystem ~= nil then
+        for spline in pairs(g_currentMission.aiSystem:getRoadSplines()) do
+            local chain = sampleSplineChain(spline, 6.0)
+            if chain ~= nil then
+                splineCount = splineCount + 1
+                for _, point in ipairs(chain) do
+                    local r, g, b, w = getTerrainAttributesAtWorldPos(g_terrainNode, point[1], 0, point[2], true, true, true, true, false)
+                    local key = layerKey(r, g, b, w)
+                    splineCounts[key] = (splineCounts[key] or 0) + 1
+                    splineTotal = splineTotal + 1
+                end
+            end
+        end
+    end
+
+    local roadKeys, forestKeys = 0, 0
+    for key, count in pairs(splineCounts) do
+        local splineShare = count / splineTotal
+        local mapShare = (mapCounts[key] or 0) / math.max(1, mapTotal)
+        if splineShare >= WailaTrailTracer.LAYER_LEARN_MIN_SPLINE_SHARE and mapShare <= WailaTrailTracer.LAYER_LEARN_MAX_MAP_SHARE then
+            layerClassByKey[key] = WailaTrailTracer.LAYER_CLASS_ROAD
+            roadKeys = roadKeys + 1
+            log("LayerClasses: ROAD   %s  (%.0f%% of spline samples, %.1f%% of map)", layerKeyToString(key), splineShare * 100, mapShare * 100)
+        end
+    end
+    for key, count in pairs(mapCounts) do
+        local forest = forestCounts[key] or 0
+        if layerClassByKey[key] == nil and forest >= WailaTrailTracer.LAYER_LEARN_MIN_FOREST_CELLS
+            and forest / count >= WailaTrailTracer.LAYER_LEARN_MIN_FOREST_SHARE then
+            layerClassByKey[key] = WailaTrailTracer.LAYER_CLASS_FOREST
+            forestKeys = forestKeys + 1
+            log("LayerClasses: FOREST %s  (%.0f%% of its %d cells in forest cells, %.1f%% of map)", layerKeyToString(key), forest / count * 100, count, count / math.max(1, mapTotal) * 100)
+        end
+    end
+
+    WailaTrailTracer.layerClassLearned = roadKeys + forestKeys > 0
+    log("LayerClasses: learned %d road + %d forest layer(s) from %d spline(s) / %d spline sample(s), %d map cell(s), %.0fms",
+        roadKeys, forestKeys, splineCount, splineTotal, mapTotal, (getTimeSec() - startTime) * 1000)
+end
+
+-- Thin vs area (real design point: "the difference between IW tracks and
+-- forest is that one is a line, the other an area"). Morphological OPENING
+-- of a boolean mask: erode, then dilate, with a square (2r+1) kernel -- any
+-- structure narrower than the kernel disappears, areas survive. mask is
+-- mask[z][x] over 0..n-1; cells outside the window are skipped (not treated
+-- as empty), so the window border does not eat into areas.
+WailaTrailTracer.LAYER_THIN_RADIUS = 3
+
+local function filterLine(line, n, radius, erode)
+    local out = {}
+    for i = 0, n - 1 do
+        local result = erode
+        for j = math.max(0, i - radius), math.min(n - 1, i + radius) do
+            if erode then
+                if not line[j] then
+                    result = false
+                    break
+                end
+            elseif line[j] then
+                result = true
+                break
+            end
+        end
+        out[i] = result
+    end
+    return out
+end
+
+local function openMask(mask, n, radius)
+    local function pass(source, erode)
+        local rows = {}
+        for z = 0, n - 1 do
+            rows[z] = filterLine(source[z], n, radius, erode)
+        end
+        local result = {}
+        for z = 0, n - 1 do
+            result[z] = {}
+        end
+        for x = 0, n - 1 do
+            local column = {}
+            for z = 0, n - 1 do
+                column[z] = rows[z][x]
+            end
+            local filtered = filterLine(column, n, radius, erode)
+            for z = 0, n - 1 do
+                result[z][x] = filtered[z]
+            end
+        end
+        return result
+    end
+    return pass(pass(mask, true), false)
+end
+
+-- Debug overlay: classify a square of 1m cells around (x, z) with the learned
+-- table, one terrain read per cell, and draw road (value 1) and forest
+-- (value 2) as row-run rectangles on their own overlay (TaskMap draws it).
+WailaTrailTracer.LAYER_OVERLAY_HALF_SIZE = 96
+function WailaTrailTracer.buildLayerClassOverlay(centerX, centerZ)
+    if not WailaTrailTracer.layerClassLearned then
+        WailaTrailTracer.learnLayerClasses()
+    end
+    local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    if WailaTrailTracer.layerClassOverlayMap == nil then
+        WailaTrailTracer.layerClassOverlayMap = createBitVectorMap("wailaLayerClassOverlayMap")
+        loadBitVectorMapNew(WailaTrailTracer.layerClassOverlayMap, size, size, 3, false)
+        WailaTrailTracer.layerClassOverlay = createDensityMapVisualizationOverlay("wailaLayerClassOverlay", size, size)
+    end
+
+    local startTime = getTimeSec()
+    local half = WailaTrailTracer.LAYER_OVERLAY_HALF_SIZE
+    local minX, minZ = math.floor(centerX) - half, math.floor(centerZ) - half
+    local modifier = DensityMapModifier.new(WailaTrailTracer.layerClassOverlayMap, 0, 3, g_terrainNode)
+    WailaTrailTracer.clearLayerOverlayWindow(modifier, minX, minZ, half * 2)
+    local cellsPerSide = half * 2
+    local rects, reads = 0, 0
+
+    -- pass 1: one terrain read per cell -> class grid
+    local classGrid, forestMask = {}, {}
+    for zi = 0, cellsPerSide - 1 do
+        local classRow, forestRow = {}, {}
+        local z = minZ + zi + 0.5
+        for xi = 0, cellsPerSide - 1 do
+            local class = WailaTrailTracer.getLayerClassAt(minX + xi + 0.5, z)
+            reads = reads + 1
+            classRow[xi] = class
+            forestRow[xi] = class == WailaTrailTracer.LAYER_CLASS_FOREST
+        end
+        classGrid[zi] = classRow
+        forestMask[zi] = forestRow
+    end
+
+    -- pass 2: forest-layer cells that do not survive the opening are THIN
+    -- (value 3); the rest is forest AREA (value 2)
+    local thinCells, areaCells = 0, 0
+    local radius = WailaTrailTracer.LAYER_THIN_RADIUS
+    if radius > 0 then
+        local opened = openMask(forestMask, cellsPerSide, radius)
+        for zi = 0, cellsPerSide - 1 do
+            for xi = 0, cellsPerSide - 1 do
+                if forestMask[zi][xi] then
+                    if opened[zi][xi] then
+                        areaCells = areaCells + 1
+                    else
+                        classGrid[zi][xi] = 3
+                        thinCells = thinCells + 1
+                    end
+                end
+            end
+        end
+    end
+
+    -- pass 3: draw row runs
+    for zi = 0, cellsPerSide - 1 do
+        local row = classGrid[zi]
+        local runClass, runStart = nil, nil
+        for xi = 0, cellsPerSide do
+            local class = nil
+            if xi < cellsPerSide then
+                class = row[xi]
+            end
+            if class ~= runClass then
+                if runClass ~= nil then
+                    modifier:clearPolygonPoints()
+                    modifier:addPolygonPointWorldCoords(minX + runStart, minZ + zi)
+                    modifier:addPolygonPointWorldCoords(minX + xi, minZ + zi)
+                    modifier:addPolygonPointWorldCoords(minX + xi, minZ + zi + 1)
+                    modifier:addPolygonPointWorldCoords(minX + runStart, minZ + zi + 1)
+                    modifier:executeSet(runClass)
+                    rects = rects + 1
+                end
+                runClass, runStart = class, xi
+            end
+        end
+    end
+
+    resetDensityMapVisualizationOverlay(WailaTrailTracer.layerClassOverlay)
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.layerClassOverlay, WailaTrailTracer.layerClassOverlayMap, 0, 0, 0, 3, WailaTrailTracer.LAYER_CLASS_ROAD, 1.0, 0.35, 0.0)
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.layerClassOverlay, WailaTrailTracer.layerClassOverlayMap, 0, 0, 0, 3, WailaTrailTracer.LAYER_CLASS_FOREST, 0.0, 0.9, 0.4)
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.layerClassOverlay, WailaTrailTracer.layerClassOverlayMap, 0, 0, 0, 3, 3, 1.0, 0.0, 1.0)
+    generateDensityMapVisualizationOverlay(WailaTrailTracer.layerClassOverlay)
+    log("buildLayerClassOverlay: %dx%dm around %.0f/%.0f, %d read(s), forest area %d cell(s) / thin %d cell(s) (opening radius %d), %d rectangle(s), %.0fms",
+        half * 2, half * 2, centerX, centerZ, reads, areaCells, thinCells, radius, rects, (getTimeSec() - startTime) * 1000)
 end
 
 -- Real request ("add minimal size.. 1 random gravel field somewhere is
@@ -3322,40 +3679,49 @@ local function smoothForestGrid(grid, protectedGrid, size, minIslandCells, minHo
         return protectedRow ~= nil and protectedRow[col] == true
     end
 
+    -- Flat parallel arrays instead of a {row, col} table per cell and a
+    -- neighbour table per step: this ran for every chunk and the
+    -- allocations were most of the forest pass's cost (measured).
     local function floodFill(startRow, startCol, value)
-        local stack = { { startRow, startCol } }
-        local cells = {}
+        local stackR, stackC, top = { startRow }, { startCol }, 1
+        local cellsR, cellsC, count = {}, {}, 0
         local touchesEdge = false
         visited[startRow][startCol] = true
-        while #stack > 0 do
-            local cell = table.remove(stack)
-            local row, col = cell[1], cell[2]
-            table.insert(cells, cell)
-            if row == 0 or col == 0 or row == size - 1 or col == size - 1 then
+        local last = size - 1
+        while top > 0 do
+            local row, col = stackR[top], stackC[top]
+            top = top - 1
+            count = count + 1
+            cellsR[count], cellsC[count] = row, col
+            if row == 0 or col == 0 or row == last or col == last then
                 touchesEdge = true
             end
-            local neighbors = { { row - 1, col }, { row + 1, col }, { row, col - 1 }, { row, col + 1 } }
-            for _, neighbor in ipairs(neighbors) do
-                local nRow, nCol = neighbor[1], neighbor[2]
-                if nRow >= 0 and nRow < size and nCol >= 0 and nCol < size
+            for direction = 1, 4 do
+                local nRow, nCol = row, col
+                if direction == 1 then nRow = row - 1
+                elseif direction == 2 then nRow = row + 1
+                elseif direction == 3 then nCol = col - 1
+                else nCol = col + 1 end
+                if nRow >= 0 and nRow <= last and nCol >= 0 and nCol <= last
                     and not visited[nRow][nCol] and getCell(nRow, nCol) == value then
                     visited[nRow][nCol] = true
-                    table.insert(stack, { nRow, nCol })
+                    top = top + 1
+                    stackR[top], stackC[top] = nRow, nCol
                 end
             end
         end
-        return cells, touchesEdge
+        return cellsR, cellsC, count, touchesEdge
     end
 
     for row = 0, size - 1 do
         for col = 0, size - 1 do
             if not visited[row][col] then
                 local value = getCell(row, col)
-                local component, touchesEdge = floodFill(row, col, value)
+                local cellsR, cellsC, count, touchesEdge = floodFill(row, col, value)
                 local threshold = value and minIslandCells or minHoleCells
-                if not touchesEdge and #component < threshold then
-                    for _, cell in ipairs(component) do
-                        local cellRow, cellCol = cell[1], cell[2]
+                if not touchesEdge and count < threshold then
+                    for i = 1, count do
+                        local cellRow, cellCol = cellsR[i], cellsC[i]
                         if not isProtected(cellRow, cellCol) then
                             grid[cellRow][cellCol] = not value
                         end
@@ -3378,11 +3744,15 @@ local forestCellCache = {}
 -- index -- adjacent chunks evaluating the same border position share one
 -- result, so they agree at the seam instead of each deciding separately.
 local forestFineCache = {}
+-- 1m "is dirt/gravel/stone" per fine cell (see absorbForestFloor).
+local forestFloorCache = {}
 
 function WailaTrailTracer.resetForestCellCache()
     forestCellCache = {}
     forestFineCache = {}
+    forestFloorCache = {}
     WailaTrailTracer.forestFineEvals = 0
+    WailaTrailTracer.forestFloorAbsorbed = 0
 end
 
 -- Real request ("locate the border of that and do a finer granular change
@@ -3402,6 +3772,13 @@ end
 -- the same AREA (96m^2) as at 4m -- at 1m that is 96 cells.
 WailaTrailTracer.FOREST_REFINE_SUBDIV = 16
 WailaTrailTracer.FOREST_REFINE_WINDOW = 12.0
+-- Real, measured (log): the 1m border pass ran 1.86M classifier windows
+-- = 178s of a 395s scan and a 448ms worst chunk. Neighbouring 12m
+-- windows share 11 of 12 metres, so almost all of that was redundant.
+-- Classify one window per STRIDE x STRIDE block (in fine cells) and let
+-- the block value fill its cells; edge detail comes back from the blur,
+-- the edge absorption (1m material reads) and the curve fit.
+WailaTrailTracer.FOREST_REFINE_EVAL_STRIDE = 4
 WailaTrailTracer.FOREST_REFINE_MIN_ISLAND_CELLS = 96
 WailaTrailTracer.FOREST_REFINE_MIN_HOLE_CELLS = 96
 -- Display-grade tolerance: the overlay texel is ~2m, so detail below
@@ -3420,12 +3797,22 @@ WailaTrailTracer.FOREST_REFINE_SMOOTH_RADIUS = 4
 -- straightens lines). Done on the GRID so the exclusion mask used by
 -- the 1m scan and the drawn outline stay identical.
 WailaTrailTracer.forestFineEvals = 0
+WailaTrailTracer.forestFloorAbsorbed = 0
+-- Edge absorption (real: "mottled" 1m-scan patches of dirt/stone along
+-- the forest edge): the 12m classifier window straddling the edge sees
+-- mostly non-forest ground, so forest stops a few metres inside the real
+-- edge and the leftover forest-floor patches get 1m-scanned and drawn as
+-- speckle. Fix: non-forest border cells within this many fine cells
+-- (metres at SUBDIV 16) of forest join it IF their own 1m material is
+-- dirt/gravel/stone. Grass never joins, so forest can't spread over open
+-- ground; roads/fields stay protected. 0 = off.
+WailaTrailTracer.FOREST_REFINE_FLOOR_REACH = 6
 -- Debug: paint forest cells whose value came from the 4m border
 -- re-evaluation (as opposed to inherited from the 16m grid) in a second
 -- colour, to make the two resolutions in one outline visible. Costs one
 -- small rectangle write per run of such cells per chunk; turn off for
 -- release. Not persisted (a reloaded save shows plain forest green).
-WailaTrailTracer.FOREST_DEBUG_MARK_REFINED = true
+WailaTrailTracer.FOREST_DEBUG_MARK_REFINED = false
 
 -- One 3x3 erode or dilate pass restricted to `evaluated` cells (double-
 -- buffered, protected cells never change). A plain majority filter was
@@ -3530,6 +3917,92 @@ local function smoothFineGrid(fine, protectedGrid, evaluated, size, radius)
     end
 end
 
+local function absorbForestFloor(fine, protectedGrid, evaluated, size, fineBaseGx, fineBaseGz, worldMin, fineCell, reach)
+    for _ = 1, reach do
+        local flips = {}
+        for r = 1, size - 2 do
+            local evaluatedRow = evaluated[r]
+            local fineRow, above, below = fine[r], fine[r - 1], fine[r + 1]
+            for c = 1, size - 2 do
+                if evaluatedRow[c] and not fineRow[c] and not protectedGrid[r][c]
+                    and (above[c] or below[c] or fineRow[c - 1] or fineRow[c + 1]) then
+                    local fx, fz = fineBaseGx + c, fineBaseGz + r
+                    local colCache = forestFloorCache[fx]
+                    if colCache == nil then
+                        colCache = {}
+                        forestFloorCache[fx] = colCache
+                    end
+                    local isFloor = colCache[fz]
+                    if isFloor == nil then
+                        isFloor = getTrailMaterialKindAt(worldMin + (fx + 0.5) * fineCell, worldMin + (fz + 0.5) * fineCell) ~= nil
+                        colCache[fz] = isFloor
+                    end
+                    if isFloor then
+                        flips[#flips + 1] = { r, c }
+                    end
+                end
+            end
+        end
+        if #flips == 0 then
+            return
+        end
+        for _, flip in ipairs(flips) do
+            fine[flip[1]][flip[2]] = true
+        end
+        WailaTrailTracer.forestFloorAbsorbed = WailaTrailTracer.forestFloorAbsorbed + #flips
+    end
+end
+
+-- Display-only gap closing. Real finding (full-map screenshot): the light
+-- green lines cutting into forest are stone-material PATHS found by the
+-- 1m scan, drawn on top of the forest layer; the roads (dark gray) are
+-- the aiSystem splines. The forest layer should be continuous under
+-- both -- but the forest mask also EXCLUDES ground from the 1m scan, so
+-- bridging a path in that mask would make the path vanish from the trail
+-- layer. Hence two grids: the scan mask stays carved, this bridged copy
+-- is what gets traced and drawn. A run of non-forest, non-protected
+-- cells at most `maxGap` long with forest at both ends (rows and columns
+-- both, which also catches diagonals) is filled.
+WailaTrailTracer.FOREST_DISPLAY_BRIDGE_GAP = 16
+
+local function bridgeThinGaps(display, protectedGrid, size, maxGap)
+    local flips = {}
+    local function scanLine(getValue, getProtected, setFlip)
+        -- gapStart: first cell after the most recent forest cell, or nil
+        -- if no forest cell has been seen yet / a protected cell broke it
+        local gapStart = nil
+        for i = 0, size - 1 do
+            if getValue(i) then
+                if gapStart ~= nil and i > gapStart and i - gapStart <= maxGap then
+                    for j = gapStart, i - 1 do
+                        setFlip(j)
+                    end
+                end
+                gapStart = i + 1
+            elseif getProtected(i) then
+                gapStart = nil
+            end
+        end
+    end
+
+    for r = 0, size - 1 do
+        local displayRow, protectedRow = display[r], protectedGrid[r]
+        scanLine(
+            function(c) return displayRow[c] end,
+            function(c) return protectedRow[c] end,
+            function(c) flips[#flips + 1] = { r, c } end)
+    end
+    for c = 0, size - 1 do
+        scanLine(
+            function(r) return display[r][c] end,
+            function(r) return protectedGrid[r][c] end,
+            function(r) flips[#flips + 1] = { r, c } end)
+    end
+    for _, flip in ipairs(flips) do
+        display[flip[1]][flip[2]] = true
+    end
+end
+
 local function cleanFineGrid(fine, protectedGrid, evaluated, size)
     morphPassGrid(fine, protectedGrid, evaluated, size, false)
     morphPassGrid(fine, protectedGrid, evaluated, size, true)
@@ -3588,6 +4061,35 @@ local function refineForestWindow(grid, protectedGrid, size, innerCells, halo, b
         borderGrid[r] = borderRow
     end
 
+    -- No border anywhere near this tile (the common case: solid forest or
+    -- solid open ground): nothing to refine -- upsample the coarse values
+    -- and skip the whole fine-grid pipeline.
+    local anyBorder = false
+    for r = coarseStart, coarseEnd do
+        local borderRow = borderGrid[r]
+        for c = coarseStart, coarseEnd do
+            if borderRow[c] then
+                anyBorder = true
+                break
+            end
+        end
+        if anyBorder then
+            break
+        end
+    end
+    if not anyBorder then
+        local flat = {}
+        for fr = 0, fineInnerCells - 1 do
+            local coarseRow = grid[halo + math.floor(fr / subdiv)]
+            local flatRow = {}
+            for fc = 0, fineInnerCells - 1 do
+                flatRow[fc] = coarseRow[halo + math.floor(fc / subdiv)] == true
+            end
+            flat[fr] = flatRow
+        end
+        return flat, fineInnerCells, fineCell, nil
+    end
+
     local fine, fineProtected, fineEvaluated = {}, {}, {}
     for fr = 0, fineSize - 1 do
         local r = coarseStart + math.floor(fr / subdiv)
@@ -3603,22 +4105,24 @@ local function refineForestWindow(grid, protectedGrid, size, innerCells, halo, b
             elseif not borderGrid[r][c] then
                 isForest, isProtected = coarseForest(r, c), false
             else
-                local cx = worldMin + (fx + 0.5) * fineCell
-                local cz = worldMin + (fz + 0.5) * fineCell
+                local stride = WailaTrailTracer.FOREST_REFINE_EVAL_STRIDE
+                local blockX, blockZ = math.floor(fx / stride), math.floor(fz / stride)
+                local cx = worldMin + (blockX * stride + stride * 0.5) * fineCell
+                local cz = worldMin + (blockZ * stride + stride * 0.5) * fineCell
                 if cx - window * 0.5 < worldMin or cz - window * 0.5 < worldMin
                     or cx + window * 0.5 > mapMax or cz + window * 0.5 > mapMax then
                     isForest, isProtected = coarseForest(r, c), false
                 else
-                    local colCache = forestFineCache[fx]
+                    local colCache = forestFineCache[blockX]
                     if colCache == nil then
                         colCache = {}
-                        forestFineCache[fx] = colCache
+                        forestFineCache[blockX] = colCache
                     end
-                    local value = colCache[fz]
+                    local value = colCache[blockZ]
                     if value == nil then
                         local f, prot = classifyForestCellFine(cx, cz, window, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
                         value = prot and 2 or (f and 1 or 0)
-                        colCache[fz] = value
+                        colCache[blockZ] = value
                         WailaTrailTracer.forestFineEvals = WailaTrailTracer.forestFineEvals + 1
                     end
                     isForest, isProtected = value == 1, value == 2
@@ -3634,6 +4138,9 @@ local function refineForestWindow(grid, protectedGrid, size, innerCells, halo, b
         fineEvaluated[fr] = fineEvaluatedRow
     end
 
+    if WailaTrailTracer.FOREST_REFINE_FLOOR_REACH > 0 then
+        absorbForestFloor(fine, fineProtected, fineEvaluated, fineSize, fineBaseGx, fineBaseGz, worldMin, fineCell, WailaTrailTracer.FOREST_REFINE_FLOOR_REACH)
+    end
     cleanFineGrid(fine, fineProtected, fineEvaluated, fineSize)
 
     smoothForestGrid(fine, fineProtected, fineSize, WailaTrailTracer.FOREST_REFINE_MIN_ISLAND_CELLS, WailaTrailTracer.FOREST_REFINE_MIN_HOLE_CELLS)
@@ -3648,7 +4155,97 @@ local function refineForestWindow(grid, protectedGrid, size, innerCells, halo, b
         inner[fr] = innerRow
         innerEvaluated[fr] = evaluatedRow
     end
-    return inner, fineInnerCells, fineCell, innerEvaluated
+
+    -- Display copy with thin gaps (paths, narrow necks) bridged; the
+    -- scan mask `inner` above stays carved so paths still get scanned.
+    local displayInner = nil
+    local maxGap = WailaTrailTracer.FOREST_DISPLAY_BRIDGE_GAP
+    if maxGap > 0 then
+        local display = {}
+        for fr = 0, fineSize - 1 do
+            local copy = {}
+            local source = fine[fr]
+            for fc = 0, fineSize - 1 do
+                copy[fc] = source[fc]
+            end
+            display[fr] = copy
+        end
+        bridgeThinGaps(display, fineProtected, fineSize, maxGap)
+        displayInner = {}
+        for fr = 0, fineInnerCells - 1 do
+            local row = {}
+            local source = display[fr + fineHalo]
+            for fc = 0, fineInnerCells - 1 do
+                row[fc] = source[fc + fineHalo]
+            end
+            displayInner[fr] = row
+        end
+    end
+    return inner, fineInnerCells, fineCell, innerEvaluated, displayInner
+end
+
+-- Real request ("roads going through forest should be green on the forest
+-- layer; the road spline goes on top as its own layer"): road cells are
+-- kept out of the forest classification (a road reads as high-diversity
+-- ground and used to get absorbed into forest blobs), which carved a
+-- channel through every forest a road crossed. After smoothing, a road
+-- cell is bridged -- turned back into forest -- if forest lies on BOTH
+-- opposite sides of it (any of 4 line directions) within `reach` cells,
+-- walking only through road cells (the whole gap at most `reach` cells
+-- wide, so a corridor is filled edge to edge or not at all). A road ending at a forest edge or
+-- running along it with open ground on the other side is not bridged,
+-- so no stubs grow along roads. Fields are never bridged.
+WailaTrailTracer.FOREST_ROAD_BRIDGE_REACH = 4
+
+local function bridgeRoadCells(grid, protectedGrid, roadGrid, size, reach)
+    if reach <= 0 then
+        return
+    end
+    local directions = { { 1, 0 }, { 0, 1 }, { 1, 1 }, { 1, -1 } }
+    local function isForest(r, c)
+        local row = grid[r]
+        return row ~= nil and row[c] == true
+    end
+    local function isRoad(r, c)
+        local row = roadGrid[r]
+        return row ~= nil and row[c] == true
+    end
+    -- steps from (r, c) to the first forest cell along (dr, dc), walking
+    -- only through road cells; nil if blocked or farther than `reach`.
+    local function stepsToForest(r, c, dr, dc)
+        for step = 1, reach do
+            local nr, nc = r + dr * step, c + dc * step
+            if isForest(nr, nc) then
+                return step
+            end
+            if not isRoad(nr, nc) then
+                return nil
+            end
+        end
+        return nil
+    end
+
+    local flips = {}
+    for r = 0, size - 1 do
+        for c = 0, size - 1 do
+            if roadGrid[r][c] and not grid[r][c] then
+                for _, d in ipairs(directions) do
+                    local forward, backward = stepsToForest(r, c, d[1], d[2]), stepsToForest(r, c, -d[1], -d[2])
+                    -- bridged only if the WHOLE gap along this line is at
+                    -- most `reach` cells wide, so a corridor is filled
+                    -- edge to edge or not at all
+                    if forward ~= nil and backward ~= nil and forward + backward - 1 <= reach then
+                        flips[#flips + 1] = { r, c }
+                        break
+                    end
+                end
+            end
+        end
+    end
+    for _, flip in ipairs(flips) do
+        grid[flip[1]][flip[2]] = true
+        protectedGrid[flip[1]][flip[2]] = false
+    end
 end
 
 -- Smooths a (innerCells + 2*halo)^2 window, returns only the inner grid
@@ -3661,9 +4258,9 @@ local function rasterizeForestWindow(minX, minZ, innerCells, halo, cellSize)
     local baseGz = math.floor((minZ - worldMin) / cellSize + 0.5) - halo
     local size = innerCells + 2 * halo
 
-    local grid, protectedGrid, voidGrid = {}, {}, {}
+    local grid, protectedGrid, voidGrid, roadGrid = {}, {}, {}, {}
     for row = 0, size - 1 do
-        local gridRow, protectedRow, voidRow = {}, {}, {}
+        local gridRow, protectedRow, voidRow, roadRow = {}, {}, {}, {}
         local gz = baseGz + row
         for col = 0, size - 1 do
             local gx = baseGx + col
@@ -3678,25 +4275,28 @@ local function rasterizeForestWindow(minX, minZ, innerCells, halo, cellSize)
                 end
                 value = colCache[gz]
                 if value == nil then
-                    local isForest, isProtected = classifyForestCell(worldMin + gx * cellSize, worldMin + gz * cellSize, cellSize, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
-                    value = isProtected and 2 or (isForest and 1 or 0)
+                    local isForest, isProtected, isRoad = classifyForestCell(worldMin + gx * cellSize, worldMin + gz * cellSize, cellSize, WailaTrailTracer.FOREST_SAMPLES_PER_AXIS)
+                    value = isProtected and (isRoad and 3 or 2) or (isForest and 1 or 0)
                     colCache[gz] = value
                 end
             end
             gridRow[col] = value == 1
-            protectedRow[col] = value == 2
+            protectedRow[col] = value == 2 or value == 3
+            roadRow[col] = value == 3
             voidRow[col] = gx < 0 or gz < 0 or gx >= mapCells or gz >= mapCells
         end
         grid[row] = gridRow
         protectedGrid[row] = protectedRow
         voidGrid[row] = voidRow
+        roadGrid[row] = roadRow
     end
 
     smoothForestGrid(grid, protectedGrid, size, WailaTrailTracer.FOREST_MIN_CELLS, WailaTrailTracer.FOREST_MIN_HOLE_CELLS, voidGrid)
+    bridgeRoadCells(grid, protectedGrid, roadGrid, size, WailaTrailTracer.FOREST_ROAD_BRIDGE_REACH)
 
     if WailaTrailTracer.FOREST_REFINE_SUBDIV > 1 then
-        local inner, fineInnerCells, fineCell, evaluated = refineForestWindow(grid, protectedGrid, size, innerCells, halo, baseGx, baseGz, worldMin, cellSize)
-        return inner, minX, minZ, fineInnerCells, fineCell, evaluated
+        local inner, fineInnerCells, fineCell, evaluated, displayInner = refineForestWindow(grid, protectedGrid, size, innerCells, halo, baseGx, baseGz, worldMin, cellSize)
+        return inner, minX, minZ, fineInnerCells, fineCell, evaluated, displayInner
     end
 
     local inner = {}
@@ -3773,17 +4373,667 @@ local function simplifyClosedLoop(loop, tolerance)
     return result
 end
 
-local function traceForestPolygonsFromGrid(grid, originX, originZ, size, cellSize)
+-- ===== Curve fit for the final forest outline =====
+-- Real request ("any stairs immediately make a human think bug ... has
+-- to look like we have this under control"): the traced 1m outline is
+-- smooth at the bitmap level but still a pixel staircase as a polygon.
+-- A human sees a few smooth arcs that meet at corners (the user's own
+-- "2 bezier curves" drawing), so: split the outline at its real corners,
+-- fit ONE cubic Bezier per section (Schneider's least-squares fit,
+-- Graphics Gems I), flatten back to a sparse polyline for drawing
+-- (DensityMapModifier only takes straight polygon points). Chunk seams
+-- are straight cuts and stay exactly straight: vertices on the tile
+-- boundary are fixed breakpoints, never smoothed across.
+WailaTrailTracer.FOREST_CURVE_FIT = true
+WailaTrailTracer.FOREST_CURVE_TOLERANCE = 1.5
+WailaTrailTracer.FOREST_CURVE_CORNER_ANGLE_DEG = 75
+WailaTrailTracer.FOREST_CURVE_CORNER_WINDOW = 5
+WailaTrailTracer.FOREST_CURVE_FLATTEN_STEP = 5.0
+
+local function normalize2(x, z, fallbackX, fallbackZ)
+    local length = math.sqrt(x * x + z * z)
+    if length < 1e-9 then
+        local fallbackLength = math.sqrt(fallbackX * fallbackX + fallbackZ * fallbackZ)
+        if fallbackLength < 1e-9 then
+            return 1, 0
+        end
+        return fallbackX / fallbackLength, fallbackZ / fallbackLength
+    end
+    return x / length, z / length
+end
+
+local function bezierPoint(b, t)
+    local mt = 1 - t
+    local b0, b1, b2, b3 = mt * mt * mt, 3 * t * mt * mt, 3 * t * t * mt, t * t * t
+    return b0 * b[1][1] + b1 * b[2][1] + b2 * b[3][1] + b3 * b[4][1],
+        b0 * b[1][2] + b1 * b[2][2] + b2 * b[3][2] + b3 * b[4][2]
+end
+
+local function bezierDerivative(b, t)
+    local mt = 1 - t
+    local c0, c1, c2 = 3 * mt * mt, 6 * mt * t, 3 * t * t
+    return c0 * (b[2][1] - b[1][1]) + c1 * (b[3][1] - b[2][1]) + c2 * (b[4][1] - b[3][1]),
+        c0 * (b[2][2] - b[1][2]) + c1 * (b[3][2] - b[2][2]) + c2 * (b[4][2] - b[3][2])
+end
+
+local function bezierSecondDerivative(b, t)
+    local mt = 1 - t
+    local ax, az = b[3][1] - 2 * b[2][1] + b[1][1], b[3][2] - 2 * b[2][2] + b[1][2]
+    local bx, bz = b[4][1] - 2 * b[3][1] + b[2][1], b[4][2] - 2 * b[3][2] + b[2][2]
+    return 6 * (mt * ax + t * bx), 6 * (mt * az + t * bz)
+end
+
+local function chordLengthParameterize(d, first, last)
+    local u = { [first] = 0 }
+    for i = first + 1, last do
+        local dx, dz = d[i][1] - d[i - 1][1], d[i][2] - d[i - 1][2]
+        u[i] = u[i - 1] + math.sqrt(dx * dx + dz * dz)
+    end
+    local total = u[last]
+    if total < 1e-9 then
+        for i = first + 1, last do
+            u[i] = (i - first) / (last - first)
+        end
+    else
+        for i = first + 1, last do
+            u[i] = u[i] / total
+        end
+    end
+    return u
+end
+
+local function generateBezier(d, first, last, u, t1x, t1z, t2x, t2z)
+    local p0, p3 = d[first], d[last]
+    local c00, c01, c11, x0, x1 = 0, 0, 0, 0, 0
+    for i = first, last do
+        local t = u[i]
+        local mt = 1 - t
+        local b0, b1, b2, b3 = mt * mt * mt, 3 * t * mt * mt, 3 * t * t * mt, t * t * t
+        local a1x, a1z = t1x * b1, t1z * b1
+        local a2x, a2z = t2x * b2, t2z * b2
+        c00 = c00 + a1x * a1x + a1z * a1z
+        c01 = c01 + a1x * a2x + a1z * a2z
+        c11 = c11 + a2x * a2x + a2z * a2z
+        local tmpX = d[i][1] - (p0[1] * (b0 + b1) + p3[1] * (b2 + b3))
+        local tmpZ = d[i][2] - (p0[2] * (b0 + b1) + p3[2] * (b2 + b3))
+        x0 = x0 + a1x * tmpX + a1z * tmpZ
+        x1 = x1 + a2x * tmpX + a2z * tmpZ
+    end
+
+    local detC0C1 = c00 * c11 - c01 * c01
+    local alphaL, alphaR = 0, 0
+    if math.abs(detC0C1) > 1e-12 then
+        alphaL = (x0 * c11 - x1 * c01) / detC0C1
+        alphaR = (c00 * x1 - c01 * x0) / detC0C1
+    end
+
+    local segLength = math.sqrt((p3[1] - p0[1]) ^ 2 + (p3[2] - p0[2]) ^ 2)
+    local epsilon = 1e-6 * segLength
+    if alphaL < epsilon or alphaR < epsilon then
+        alphaL, alphaR = segLength / 3, segLength / 3
+    end
+
+    return {
+        { p0[1], p0[2] },
+        { p0[1] + t1x * alphaL, p0[2] + t1z * alphaL },
+        { p3[1] + t2x * alphaR, p3[2] + t2z * alphaR },
+        { p3[1], p3[2] },
+    }
+end
+
+local function reparameterize(d, first, last, u, bez)
+    local result = {}
+    for i = first, last do
+        local qx, qz = bezierPoint(bez, u[i])
+        local q1x, q1z = bezierDerivative(bez, u[i])
+        local q2x, q2z = bezierSecondDerivative(bez, u[i])
+        local numerator = (qx - d[i][1]) * q1x + (qz - d[i][2]) * q1z
+        local denominator = q1x * q1x + q1z * q1z + (qx - d[i][1]) * q2x + (qz - d[i][2]) * q2z
+        if math.abs(denominator) < 1e-12 then
+            result[i] = u[i]
+        else
+            result[i] = math.min(1, math.max(0, u[i] - numerator / denominator))
+        end
+    end
+    return result
+end
+
+local function computeMaxCurveError(d, first, last, bez, u)
+    local maxDist, splitIndex = 0, math.floor((first + last) / 2)
+    for i = first + 1, last - 1 do
+        local px, pz = bezierPoint(bez, u[i])
+        local dist = math.sqrt((px - d[i][1]) ^ 2 + (pz - d[i][2]) ^ 2)
+        if dist >= maxDist then
+            maxDist, splitIndex = dist, i
+        end
+    end
+    return maxDist, splitIndex
+end
+
+local function fitCubic(d, first, last, t1x, t1z, t2x, t2z, tolerance, out)
+    if last - first == 1 then
+        local dist = math.sqrt((d[last][1] - d[first][1]) ^ 2 + (d[last][2] - d[first][2]) ^ 2) / 3
+        out[#out + 1] = {
+            { d[first][1], d[first][2] },
+            { d[first][1] + t1x * dist, d[first][2] + t1z * dist },
+            { d[last][1] + t2x * dist, d[last][2] + t2z * dist },
+            { d[last][1], d[last][2] },
+        }
+        return
+    end
+
+    local u = chordLengthParameterize(d, first, last)
+    local bez = generateBezier(d, first, last, u, t1x, t1z, t2x, t2z)
+    local maxDist, splitIndex = computeMaxCurveError(d, first, last, bez, u)
+    if maxDist < tolerance then
+        out[#out + 1] = bez
+        return
+    end
+
+    if maxDist < tolerance * 2 then
+        for _ = 1, 4 do
+            u = reparameterize(d, first, last, u, bez)
+            bez = generateBezier(d, first, last, u, t1x, t1z, t2x, t2z)
+            maxDist, splitIndex = computeMaxCurveError(d, first, last, bez, u)
+            if maxDist < tolerance then
+                out[#out + 1] = bez
+                return
+            end
+        end
+    end
+
+    local cx, cz = normalize2(d[splitIndex - 1][1] - d[splitIndex + 1][1], d[splitIndex - 1][2] - d[splitIndex + 1][2], t1x, t1z)
+    fitCubic(d, first, splitIndex, t1x, t1z, cx, cz, tolerance, out)
+    fitCubic(d, splitIndex, last, -cx, -cz, t2x, t2z, tolerance, out)
+end
+
+-- Appends the flattened curve (excluding its start point) to `out`.
+local function flattenBezier(bez, step, out)
+    local function lineDist(p)
+        local dx, dz = bez[4][1] - bez[1][1], bez[4][2] - bez[1][2]
+        local length = math.sqrt(dx * dx + dz * dz)
+        if length < 1e-9 then
+            return math.sqrt((p[1] - bez[1][1]) ^ 2 + (p[2] - bez[1][2]) ^ 2)
+        end
+        return math.abs((p[1] - bez[1][1]) * dz - (p[2] - bez[1][2]) * dx) / length
+    end
+    local flatness = math.max(lineDist(bez[2]), lineDist(bez[3]))
+    if flatness < 0.3 then
+        out[#out + 1] = { bez[4][1], bez[4][2] }
+        return
+    end
+    local function segLen(a, b)
+        return math.sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+    end
+    local arc = (segLen(bez[1], bez[2]) + segLen(bez[2], bez[3]) + segLen(bez[3], bez[4]) + segLen(bez[1], bez[4])) * 0.5
+    local n = math.min(64, math.max(2, math.ceil(arc / step)))
+    for i = 1, n - 1 do
+        local x, z = bezierPoint(bez, i / n)
+        out[#out + 1] = { x, z }
+    end
+    out[#out + 1] = { bez[4][1], bez[4][2] }
+end
+
+-- Open polyline -> points spaced `spacing` apart along its length, first
+-- and last point preserved exactly.
+local function resamplePolyline(points, spacing)
+    local result = { { points[1][1], points[1][2] } }
+    local carried = 0
+    for i = 2, #points do
+        local ax, az = points[i - 1][1], points[i - 1][2]
+        local dx, dz = points[i][1] - ax, points[i][2] - az
+        local segLength = math.sqrt(dx * dx + dz * dz)
+        local position = spacing - carried
+        while position <= segLength + 1e-9 do
+            local t = position / segLength
+            result[#result + 1] = { ax + dx * t, az + dz * t }
+            position = position + spacing
+        end
+        carried = segLength - (position - spacing)
+    end
+    local last = points[#points]
+    local tail = result[#result]
+    if (tail[1] - last[1]) ^ 2 + (tail[2] - last[2]) ^ 2 > 1e-6 then
+        result[#result + 1] = { last[1], last[2] }
+    else
+        result[#result] = { last[1], last[2] }
+    end
+    return result
+end
+
+-- Indices (into R) of sharp corners, by the turn angle between the
+-- chords `window` points before/after. Non-maximum suppressed. `ring`
+-- wraps the index instead of truncating the window at the ends.
+local function detectCorners(R, window, thresholdDeg, ring)
+    local count = #R
+    local angles = {}
+    local threshold = math.rad(thresholdDeg)
+    for i = 1, count do
+        local before, after
+        if ring then
+            before = R[(i - 1 - window) % count + 1]
+            after = R[(i - 1 + window) % count + 1]
+        else
+            local reach = math.min(window, i - 1, count - i)
+            if reach >= 2 then
+                before, after = R[i - reach], R[i + reach]
+            end
+        end
+        if before ~= nil then
+            local ax, az = R[i][1] - before[1], R[i][2] - before[2]
+            local bx, bz = after[1] - R[i][1], after[2] - R[i][2]
+            local la, lb = math.sqrt(ax * ax + az * az), math.sqrt(bx * bx + bz * bz)
+            if la > 1e-9 and lb > 1e-9 then
+                local cosine = math.max(-1, math.min(1, (ax * bx + az * bz) / (la * lb)))
+                angles[i] = math.acos(cosine)
+            end
+        end
+    end
+    local corners = {}
+    for i = 1, count do
+        local angle = angles[i]
+        if angle ~= nil and angle >= threshold then
+            local isMax = true
+            for offset = -window, window do
+                local j = i + offset
+                if ring then
+                    j = (j - 1) % count + 1
+                end
+                local other = angles[j]
+                if j ~= i and other ~= nil and (other > angle or (other == angle and j < i)) then
+                    isMax = false
+                    break
+                end
+            end
+            if isMax then
+                corners[#corners + 1] = i
+            end
+        end
+    end
+    return corners
+end
+
+-- Fits curves along an OPEN chain (ends are fixed). tStart/tEnd: optional
+-- tangent overrides (smooth joins); otherwise one-sided estimates.
+-- Appends flattened points (excluding the chain's first point) to out.
+local function fitOpenChain(chain, tolerance, tStart, tEnd, out)
+    local R = resamplePolyline(chain, 1.0)
+    local count = #R
+    if count < 3 then
+        for i = 2, #chain do
+            out[#out + 1] = { chain[i][1], chain[i][2] }
+        end
+        return
+    end
+
+    local splits = { 1 }
+    for _, index in ipairs(detectCorners(R, WailaTrailTracer.FOREST_CURVE_CORNER_WINDOW, WailaTrailTracer.FOREST_CURVE_CORNER_ANGLE_DEG, false)) do
+        if index > 1 and index < count then
+            splits[#splits + 1] = index
+        end
+    end
+    splits[#splits + 1] = count
+
+    local tangentReach = 3
+    for s = 1, #splits - 1 do
+        local first, last = splits[s], splits[s + 1]
+        local reach = math.min(tangentReach, last - first)
+        local t1x, t1z = normalize2(R[first + reach][1] - R[first][1], R[first + reach][2] - R[first][2], R[last][1] - R[first][1], R[last][2] - R[first][2])
+        local t2x, t2z = normalize2(R[last - reach][1] - R[last][1], R[last - reach][2] - R[last][2], R[first][1] - R[last][1], R[first][2] - R[last][2])
+        if s == 1 and tStart ~= nil then
+            t1x, t1z = tStart[1], tStart[2]
+        end
+        if s == #splits - 1 and tEnd ~= nil then
+            t2x, t2z = tEnd[1], tEnd[2]
+        end
+        local beziers = {}
+        fitCubic(R, first, last, t1x, t1z, t2x, t2z, tolerance, beziers)
+        for _, bez in ipairs(beziers) do
+            flattenBezier(bez, WailaTrailTracer.FOREST_CURVE_FLATTEN_STEP, out)
+        end
+    end
+end
+
+local function dropCollinearRing(loop)
+    local n = #loop
+    local out = {}
+    for i = 1, n do
+        local p, c, q = loop[(i - 2) % n + 1], loop[i], loop[i % n + 1]
+        local cross = (c[1] - p[1]) * (q[2] - c[2]) - (c[2] - p[2]) * (q[1] - c[1])
+        if math.abs(cross) > 1e-6 then
+            out[#out + 1] = c
+        end
+    end
+    return out
+end
+
+-- bounds = { minX, minZ, maxX, maxZ } of the tile this loop was traced
+-- in. Returns a closed ring (no repeated end point) of sparse points, or
+-- nil if the loop is too degenerate to fit (caller falls back).
+local function fitLoopCurves(loop, bounds, tolerance)
+    local ring = dropCollinearRing(loop)
+    local n = #ring
+    if n < 6 then
+        return nil
+    end
+
+    local eps = 1e-3
+    local function lineMask(p)
+        local mask = 0
+        if p[1] <= bounds.minX + eps then mask = mask + 1 end
+        if p[1] >= bounds.maxX - eps then mask = mask + 2 end
+        if p[2] <= bounds.minZ + eps then mask = mask + 4 end
+        if p[2] >= bounds.maxZ - eps then mask = mask + 8 end
+        return mask
+    end
+    local masks = {}
+    for i = 1, n do
+        masks[i] = lineMask(ring[i])
+    end
+    local isBreak = {}
+    local breakCount = 0
+    local function isSeamEdge(i)
+        return bit32.band(masks[i], masks[i % n + 1]) ~= 0
+    end
+    for i = 1, n do
+        if isSeamEdge(i) then
+            if not isBreak[i] then isBreak[i] = true breakCount = breakCount + 1 end
+            local nextIndex = i % n + 1
+            if not isBreak[nextIndex] then isBreak[nextIndex] = true breakCount = breakCount + 1 end
+        end
+    end
+
+    local out = {}
+    if breakCount > 0 then
+        local startIndex
+        for i = 1, n do
+            if isBreak[i] then startIndex = i break end
+        end
+        out[1] = { ring[startIndex][1], ring[startIndex][2] }
+        local chain = { ring[startIndex] }
+        for step = 1, n do
+            local index = (startIndex - 1 + step) % n + 1
+            chain[#chain + 1] = ring[index]
+            if isBreak[index] then
+                if #chain == 2 then
+                    out[#out + 1] = { chain[2][1], chain[2][2] }
+                else
+                    fitOpenChain(chain, tolerance, nil, nil, out)
+                end
+                chain = { ring[index] }
+            end
+        end
+        -- last point equals the first (ring closed) -- drop the duplicate
+        out[#out] = nil
+    else
+        -- no seam contact: a free-standing loop. Close the ring, find
+        -- corners on the resampled closed polyline.
+        local closed = {}
+        for i = 1, n do closed[i] = ring[i] end
+        closed[n + 1] = ring[1]
+        local R = resamplePolyline(closed, 1.0)
+        R[#R] = nil
+        local corners = detectCorners(R, WailaTrailTracer.FOREST_CURVE_CORNER_WINDOW, WailaTrailTracer.FOREST_CURVE_CORNER_ANGLE_DEG, true)
+        local count = #R
+        local rotated = {}
+        local tStart, tEnd
+        local startAt = corners[1] or 1
+        for i = 0, count - 1 do
+            rotated[i + 1] = R[(startAt - 1 + i) % count + 1]
+        end
+        rotated[count + 1] = rotated[1]
+        if corners[1] == nil then
+            local reach = 3
+            local tx, tz = normalize2(R[(startAt - 1 + reach) % count + 1][1] - R[(startAt - 1 - reach) % count + 1][1], R[(startAt - 1 + reach) % count + 1][2] - R[(startAt - 1 - reach) % count + 1][2], 1, 0)
+            tStart, tEnd = { tx, tz }, { -tx, -tz }
+        end
+        out[1] = { rotated[1][1], rotated[1][2] }
+        fitOpenChain(rotated, tolerance, tStart, tEnd, out)
+        out[#out] = nil
+    end
+
+    if #out < 3 then
+        return nil
+    end
+    return out
+end
+-- ===== end curve fit =====
+
+local curveFitFailureLogged = false
+
+local function traceForestPolygonsFromGrid(grid, originX, originZ, size, cellSize, curveTolerance)
     local result = collectBorderSegments(grid, originX, originZ, size, cellSize)
     local polygons = {}
+    local fine = cellSize < WailaTrailTracer.FOREST_CELL_SIZE
+    local bounds = { minX = originX, minZ = originZ, maxX = originX + size * cellSize, maxZ = originZ + size * cellSize }
     for _, loop in ipairs(WailaTrailTracer.chainBorderLoops(result.segments)) do
-        local tolerance = WailaTrailTracer.FOREST_SIMPLIFY_TOLERANCE
-        if cellSize < WailaTrailTracer.FOREST_CELL_SIZE then
-            tolerance = WailaTrailTracer.FOREST_REFINE_SIMPLIFY_TOLERANCE
+        local polygon
+        if fine and WailaTrailTracer.FOREST_CURVE_FIT then
+            local ok, fitted = pcall(fitLoopCurves, loop, bounds, curveTolerance or WailaTrailTracer.FOREST_CURVE_TOLERANCE)
+            if ok then
+                polygon = fitted
+            elseif not curveFitFailureLogged then
+                curveFitFailureLogged = true
+                log("traceForestPolygonsFromGrid: curve fit failed (%s), falling back to Douglas-Peucker", tostring(fitted))
+            end
         end
-        table.insert(polygons, simplifyClosedLoop(loop, tolerance))
+        if polygon == nil then
+            local tolerance = WailaTrailTracer.FOREST_SIMPLIFY_TOLERANCE
+            if fine then
+                tolerance = WailaTrailTracer.FOREST_REFINE_SIMPLIFY_TOLERANCE
+            end
+            polygon = simplifyClosedLoop(loop, tolerance)
+        end
+        table.insert(polygons, polygon)
     end
     return polygons, result.cellCount
+end
+
+function WailaTrailTracer.clearLayerOverlayWindow(modifier, minX, minZ, size)
+    modifier:clearPolygonPoints()
+    modifier:addPolygonPointWorldCoords(minX, minZ)
+    modifier:addPolygonPointWorldCoords(minX + size, minZ)
+    modifier:addPolygonPointWorldCoords(minX + size, minZ + size)
+    modifier:addPolygonPointWorldCoords(minX, minZ + size)
+    modifier:executeSet(0)
+end
+
+-- Debug: which (paint layer fingerprint + material id) PAIRS exist around a
+-- spot, colour-coded, with a legend in the log. Real finding (IW tracks drawn
+-- as "forest" by the layer classes): IW wear shares the 0.591 layer with the
+-- forest floor, so layer alone can't separate them -- this shows whether the
+-- material id (or something else) does. Top 7 pairs by frequency get colours.
+local LAYER_PAIR_COLORS = {
+    { "red", 1.0, 0.2, 0.2 }, { "orange", 1.0, 0.6, 0.0 }, { "yellow", 1.0, 1.0, 0.0 }, { "green", 0.1, 0.9, 0.2 },
+    { "cyan", 0.0, 0.9, 0.9 }, { "blue", 0.2, 0.4, 1.0 }, { "magenta", 1.0, 0.0, 1.0 },
+}
+function WailaTrailTracer.buildLayerPairOverlay(centerX, centerZ)
+    local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    if WailaTrailTracer.layerClassOverlayMap == nil then
+        WailaTrailTracer.layerClassOverlayMap = createBitVectorMap("wailaLayerClassOverlayMap")
+        loadBitVectorMapNew(WailaTrailTracer.layerClassOverlayMap, size, size, 3, false)
+        WailaTrailTracer.layerClassOverlay = createDensityMapVisualizationOverlay("wailaLayerClassOverlay", size, size)
+    end
+
+    local startTime = getTimeSec()
+    local half = WailaTrailTracer.LAYER_OVERLAY_HALF_SIZE
+    local minX, minZ = math.floor(centerX) - half, math.floor(centerZ) - half
+    local cellsPerSide = half * 2
+
+    -- pass 1: one terrain read per cell, remember the pair key, count
+    local pairKeys, counts, total = {}, {}, 0
+    for zi = 0, cellsPerSide - 1 do
+        local row = {}
+        local z = minZ + zi + 0.5
+        for xi = 0, cellsPerSide - 1 do
+            local r, g, b, w, materialId = getTerrainAttributesAtWorldPos(g_terrainNode, minX + xi + 0.5, 0, z, true, true, true, true, false)
+            local key = layerKey(r, g, b, w) * 10 + (materialId or 0)
+            row[xi] = key
+            counts[key] = (counts[key] or 0) + 1
+            total = total + 1
+        end
+        pairKeys[zi] = row
+    end
+
+    local ranked = {}
+    for key, count in pairs(counts) do
+        ranked[#ranked + 1] = { key = key, count = count }
+    end
+    table.sort(ranked, function(a, b) return a.count > b.count end)
+    local valueOfKey = {}
+    for index = 1, math.min(#LAYER_PAIR_COLORS, #ranked) do
+        valueOfKey[ranked[index].key] = index
+        local key = ranked[index].key
+        log("LayerPairs: %-7s value %d = layer %s + %s [%d]  %.1f%%  (class: %s)", LAYER_PAIR_COLORS[index][1], index,
+            layerKeyToString(math.floor(key / 10)), WailaTerrain.getMaterialName(key % 10), key % 10, ranked[index].count / total * 100,
+            tostring(layerClassByKey[math.floor(key / 10)]))
+    end
+
+    -- pass 2: draw runs
+    local modifier = DensityMapModifier.new(WailaTrailTracer.layerClassOverlayMap, 0, 3, g_terrainNode)
+    WailaTrailTracer.clearLayerOverlayWindow(modifier, minX, minZ, cellsPerSide)
+    local rects = 0
+    for zi = 0, cellsPerSide - 1 do
+        local row = pairKeys[zi]
+        local runValue, runStart = nil, nil
+        for xi = 0, cellsPerSide do
+            local value = nil
+            if xi < cellsPerSide then
+                value = valueOfKey[row[xi]]
+            end
+            if value ~= runValue then
+                if runValue ~= nil then
+                    modifier:clearPolygonPoints()
+                    modifier:addPolygonPointWorldCoords(minX + runStart, minZ + zi)
+                    modifier:addPolygonPointWorldCoords(minX + xi, minZ + zi)
+                    modifier:addPolygonPointWorldCoords(minX + xi, minZ + zi + 1)
+                    modifier:addPolygonPointWorldCoords(minX + runStart, minZ + zi + 1)
+                    modifier:executeSet(runValue)
+                    rects = rects + 1
+                end
+                runValue, runStart = value, xi
+            end
+        end
+    end
+
+    resetDensityMapVisualizationOverlay(WailaTrailTracer.layerClassOverlay)
+    for index, color in ipairs(LAYER_PAIR_COLORS) do
+        setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.layerClassOverlay, WailaTrailTracer.layerClassOverlayMap, 0, 0, 0, 3, index, color[2], color[3], color[4])
+    end
+    generateDensityMapVisualizationOverlay(WailaTrailTracer.layerClassOverlay)
+    log("buildLayerPairOverlay: %dx%dm around %.0f/%.0f, %d distinct pair(s), %d rectangle(s), %.0fms", cellsPerSide, cellsPerSide, centerX, centerZ, #ranked, rects, (getTimeSec() - startTime) * 1000)
+end
+
+-- ===== Road layer pass =====
+-- Real request ("road should give a simple spline, and that goes on top of
+-- whatever the forest does"): roads are found by their learned paint layer
+-- (learnLayerClasses), completely independent of the forest classification,
+-- so they can no longer vanish when the forest edge jitters across them.
+-- Per chunk: a 4m-stride prefilter (256 terrain reads); only chunks with a
+-- hit get the 1m pass (4096 reads), traced into thin polygons with the
+-- same loop tracer + curve fit the forest uses (tight tolerance: roads are
+-- only a few metres wide). Drawn on its own overlay, on top.
+WailaTrailTracer.ROAD_LAYER_PREFILTER_STRIDE = 4
+WailaTrailTracer.ROAD_LAYER_CURVE_TOLERANCE = 0.7
+WailaTrailTracer.ROAD_LAYER_OVERLAY_REGENERATE_INTERVAL_SEC = 3.0
+
+function WailaTrailTracer.scanRoadLayerChunk(minX, minZ, chunkSize)
+    if not WailaTrailTracer.layerClassLearned then
+        return {}, 0
+    end
+    local roadClass = WailaTrailTracer.LAYER_CLASS_ROAD
+    local stride = WailaTrailTracer.ROAD_LAYER_PREFILTER_STRIDE
+    local anyHit = false
+    for dz = stride * 0.5, chunkSize, stride do
+        for dx = stride * 0.5, chunkSize, stride do
+            if WailaTrailTracer.getLayerClassAt(minX + dx, minZ + dz) == roadClass then
+                anyHit = true
+                break
+            end
+        end
+        if anyHit then
+            break
+        end
+    end
+    if not anyHit then
+        return {}, 0
+    end
+
+    local cells = math.floor(chunkSize)
+    local grid, roadCells = {}, 0
+    for row = 0, cells - 1 do
+        local gridRow = {}
+        local z = minZ + row + 0.5
+        for col = 0, cells - 1 do
+            local isRoad = WailaTrailTracer.getLayerClassAt(minX + col + 0.5, z) == roadClass
+            gridRow[col] = isRoad
+            if isRoad then
+                roadCells = roadCells + 1
+            end
+        end
+        grid[row] = gridRow
+    end
+    if roadCells == 0 then
+        return {}, 0
+    end
+    local polygons = traceForestPolygonsFromGrid(grid, minX, minZ, cells, 1.0, WailaTrailTracer.ROAD_LAYER_CURVE_TOLERANCE)
+    return polygons, roadCells
+end
+
+WailaTrailTracer.lastRoadLayerOverlayRegenerateTime = nil
+function WailaTrailTracer.buildRoadLayerOverlayIncremental(polygons, forceRegenerate)
+    local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    if WailaTrailTracer.roadLayerOverlayMap == nil then
+        WailaTrailTracer.roadLayerOverlayMap = createBitVectorMap("wailaRoadLayerOverlayMap")
+        loadBitVectorMapNew(WailaTrailTracer.roadLayerOverlayMap, size, size, 1, false)
+        WailaTrailTracer.roadLayerOverlay = createDensityMapVisualizationOverlay("wailaRoadLayerOverlay", size, size)
+    end
+
+    local modifier = DensityMapModifier.new(WailaTrailTracer.roadLayerOverlayMap, 0, 1, g_terrainNode)
+    for _, polygon in ipairs(polygons) do
+        modifier:clearPolygonPoints()
+        for _, point in ipairs(polygon) do
+            modifier:addPolygonPointWorldCoords(point[1], point[2])
+        end
+        modifier:executeSet(1)
+    end
+
+    local now = getTimeSec()
+    if not forceRegenerate and WailaTrailTracer.lastRoadLayerOverlayRegenerateTime ~= nil
+        and now - WailaTrailTracer.lastRoadLayerOverlayRegenerateTime < WailaTrailTracer.ROAD_LAYER_OVERLAY_REGENERATE_INTERVAL_SEC then
+        return
+    end
+    WailaTrailTracer.lastRoadLayerOverlayRegenerateTime = now
+
+    local color = paletteColor("road")
+    resetDensityMapVisualizationOverlay(WailaTrailTracer.roadLayerOverlay)
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.roadLayerOverlay, WailaTrailTracer.roadLayerOverlayMap, 0, 0, 0, 1, 1, color[1], color[2], color[3])
+    generateDensityMapVisualizationOverlay(WailaTrailTracer.roadLayerOverlay)
+end
+
+-- Debug colour mode: re-colour every existing overlay (one regenerate each).
+function WailaTrailTracer.setDebugColors(enabled)
+    WailaTrailTracer.debugColors = enabled == true
+    if WailaTrailTracer.testOverlayMap ~= nil then
+        WailaTrailTracer.buildTestOverlay({}, true)
+    end
+    if WailaTrailTracer.forestOverlayMap ~= nil then
+        WailaTrailTracer.buildForestOverlayIncremental({}, true)
+    end
+    if WailaTrailTracer.roadLayerOverlayMap ~= nil then
+        WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+    end
+    if WailaTrailTracer.roadOverlayMap ~= nil and WailaTrailTracer.roadOverlay ~= nil then
+        local color = paletteColor("spline")
+        resetDensityMapVisualizationOverlay(WailaTrailTracer.roadOverlay)
+        setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.roadOverlay, WailaTrailTracer.roadOverlayMap, 0, 0, 0, 1, 1, color[1], color[2], color[3])
+        generateDensityMapVisualizationOverlay(WailaTrailTracer.roadOverlay)
+    end
+    log("overlay colours: %s mode", WailaTrailTracer.debugColors and "DEBUG (loud)" or "normal")
+end
+
+function WailaTrailTracer.toggleDebugColors()
+    WailaTrailTracer.setDebugColors(not WailaTrailTracer.debugColors)
 end
 
 -- Real integration, extracted from buildForestOverlay's own original
@@ -3854,7 +5104,8 @@ function WailaTrailTracer.buildForestOverlayIncremental(polygons, forceRegenerat
     WailaTrailTracer.lastForestOverlayRegenerateTime = now
 
     resetDensityMapVisualizationOverlay(WailaTrailTracer.forestOverlay)
-    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.forestOverlay, map, 0, 0, 0, 2, 1, 0.05, 0.35, 0.05)
+    local forestColor = paletteColor("forest")
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.forestOverlay, map, 0, 0, 0, 2, 1, forestColor[1], forestColor[2], forestColor[3])
     setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.forestOverlay, map, 0, 0, 0, 2, 2, 0.85, 0.45, 0.05)
     generateDensityMapVisualizationOverlay(WailaTrailTracer.forestOverlay)
 end
@@ -3870,7 +5121,8 @@ function WailaTrailTracer.buildForestOverlay(x, z)
     local size = math.ceil((maxX - minX) / cellSize)
 
     local startTime = getTimeSec()
-    local grid, originX, originZ, gridSize, gridCellSize, evaluated = rasterizeForestWindow(minX, minZ, size, WailaTrailTracer.FOREST_HALO_CELLS, cellSize)
+    local grid, originX, originZ, gridSize, gridCellSize, evaluated, displayGrid = rasterizeForestWindow(minX, minZ, size, WailaTrailTracer.FOREST_HALO_CELLS, cellSize)
+    grid = displayGrid or grid
     local polygons, cellCount = traceForestPolygonsFromGrid(grid, originX, originZ, gridSize, gridCellSize)
 
     WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, polygons)
@@ -3966,12 +5218,74 @@ function WailaTrailTracer.clearScanOverlays()
     end
     clearMap(WailaTrailTracer.testOverlayMap, WailaTrailTracer.OVERLAY_NUM_CHANNELS)
     clearMap(WailaTrailTracer.forestOverlayMap, 2)
+    clearMap(WailaTrailTracer.roadLayerOverlayMap, 1)
     if WailaTrailTracer.testOverlayMap ~= nil then
         WailaTrailTracer.buildTestOverlay({}, true)
     end
     if WailaTrailTracer.forestOverlayMap ~= nil then
         WailaTrailTracer.buildForestOverlayIncremental({}, true)
     end
+    if WailaTrailTracer.roadLayerOverlayMap ~= nil then
+        WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+    end
+end
+
+-- Real, measured (log): scans took 372-418s, mostly NOT compute -- the scan
+-- ran exactly ONE phase per frame however cheap it was (solid forest/open
+-- chunks cost ~2ms), so wall time was frames, not work: 4096 chunks x 2-3
+-- phases at 26-50fps. Now phases run back to back until the per-frame
+-- budget is spent (always at least one, so a heavy phase still completes
+-- in a single frame as before).
+WailaTrailTracer.WHOLE_MAP_SCAN_FRAME_BUDGET_SEC = 0.008
+
+function WailaTrailTracer.tickWholeMapScan()
+    if WailaTrailTracer.wholeMapScanState == nil then
+        return true
+    end
+    local frameStart = getTimeSec()
+    local done = false
+    repeat
+        done = WailaTrailTracer.tickWholeMapScanStep()
+    until done or getTimeSec() - frameStart >= WailaTrailTracer.WHOLE_MAP_SCAN_FRAME_BUDGET_SEC
+    return done
+end
+
+-- Debug: redo only the road layer (learn classes, clear the road overlay,
+-- one road pass per chunk).
+function WailaTrailTracer.startRoadLayerOnlyScan()
+    if WailaTrailTracer.loadState ~= nil or WailaTrailTracer.saveState ~= nil or WailaTrailTracer.wholeMapScanState ~= nil then
+        log("startRoadLayerOnlyScan: refused -- a scan/save/load is already in progress")
+        return
+    end
+    WailaTrailTracer.learnLayerClasses()
+    if WailaTrailTracer.roadLayerOverlayMap ~= nil then
+        local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+        local half = terrainSize * 0.5
+        local modifier = DensityMapModifier.new(WailaTrailTracer.roadLayerOverlayMap, 0, 1, g_terrainNode)
+        modifier:clearPolygonPoints()
+        modifier:addPolygonPointWorldCoords(-half, -half)
+        modifier:addPolygonPointWorldCoords(half, -half)
+        modifier:addPolygonPointWorldCoords(half, half)
+        modifier:addPolygonPointWorldCoords(-half, half)
+        modifier:executeSet(0)
+        WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+    end
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
+    local chunksPerSide = math.ceil(terrainSize / chunkSize)
+    WailaTrailTracer.wholeMapScanState = {
+        originX = -terrainSize * 0.5,
+        originZ = -terrainSize * 0.5,
+        chunkSize = chunkSize,
+        chunksPerSide = chunksPerSide,
+        col = 0,
+        row = 0,
+        totalCells = 0,
+        totalPolygons = 0,
+        roadOnly = true,
+        startTime = getTimeSec(),
+    }
+    log("startRoadLayerOnlyScan: %d chunk(s) queued", chunksPerSide * chunksPerSide)
 end
 
 function WailaTrailTracer.startWholeMapScan()
@@ -3982,6 +5296,12 @@ function WailaTrailTracer.startWholeMapScan()
 
     WailaTrailTracer.resetForestCellCache()
     WailaTrailTracer.clearScanOverlays()
+    WailaTrailTracer.learnLayerClasses()
+    -- Roads are static and drawn on top of forest/trail by TaskMap, but
+    -- the overlay only ever existed if the debug button was pressed.
+    -- Baked here (and after a load) so the final map always has them;
+    -- buildRoadSplineOverlay logs its own timing.
+    WailaTrailTracer.buildRoadSplineOverlay()
 
     local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
     local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
@@ -3996,8 +5316,10 @@ function WailaTrailTracer.startWholeMapScan()
         row = 0,
         totalCells = 0,
         totalPolygons = 0,
+        phase = "forest",
         startTime = getTimeSec(),
     }
+    currentChunkForestGrid = nil
 
     log("startWholeMapScan: %d chunk(s) (%dx%d, %.0fm each) queued, one per tick", chunksPerSide * chunksPerSide, chunksPerSide, chunksPerSide, chunkSize)
 end
@@ -4018,7 +5340,7 @@ end
 -- per-cell trace over ground we already know the shape of at the coarse
 -- level. Real roads stay excluded in both passes via isNearRealRoad
 -- (already wired into getTrailMaterialKindAt AND classifyForestCell).
-function WailaTrailTracer.tickWholeMapScan()
+function WailaTrailTracer.tickWholeMapScanStep()
     local state = WailaTrailTracer.wholeMapScanState
     if state == nil then
         return true
@@ -4027,19 +5349,101 @@ function WailaTrailTracer.tickWholeMapScan()
     local minX, minZ = state.originX + state.col * state.chunkSize, state.originZ + state.row * state.chunkSize
     local maxX, maxZ = minX + state.chunkSize, minZ + state.chunkSize
 
+    -- Two ticks per chunk (forest, then the 1m scan) so no single frame
+    -- does both -- measured worst whole chunk was 448ms. The forest grid
+    -- for the exclusion lookup lives in currentChunkForest* between them.
+    local function runRoadPhase()
+        local roadStartTime = getTimeSec()
+        local roadPolygons, roadCells = WailaTrailTracer.scanRoadLayerChunk(minX, minZ, state.chunkSize)
+        WailaTrailTracer.buildRoadLayerOverlayIncremental(roadPolygons)
+        local roadMs = (getTimeSec() - roadStartTime) * 1000
+        state.totalRoadMs = (state.totalRoadMs or 0) + roadMs
+        state.maxRoadMs = math.max(state.maxRoadMs or 0, roadMs)
+        state.totalRoadCells = (state.totalRoadCells or 0) + roadCells
+        state.totalRoadPolygons = (state.totalRoadPolygons or 0) + #roadPolygons
+    end
+
+    -- Road-layer-only rescan (debug hub): one cheap frame per chunk, no
+    -- forest, no 1m material scan -- about a minute for the whole map.
+    if state.roadOnly then
+        runRoadPhase()
+        state.col = state.col + 1
+        if state.col >= state.chunksPerSide then
+            state.col = 0
+            state.row = state.row + 1
+        end
+        if state.row >= state.chunksPerSide then
+            WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+            local elapsedMs = (getTimeSec() - state.startTime) * 1000
+            log("tickWholeMapScan (road layer only) done: %d chunk(s), %d road cell(s), %d polygon(s), road pass %.0fms total, worst frame %.0fms, %.1fs wall",
+                state.chunksPerSide * state.chunksPerSide, state.totalRoadCells or 0, state.totalRoadPolygons or 0, state.totalRoadMs or 0, state.maxRoadMs or 0, elapsedMs / 1000)
+            WailaTrailTracer.wholeMapScanState = nil
+            return true
+        end
+        return false
+    end
+
+    if state.phase == "road" then
+        runRoadPhase()
+        state.phase = "scan"
+        return false
+    end
+
+    if state.phase == "scan" then
+        local scanStartTime = getTimeSec()
+        local scan = WailaTrailTracer.scanTileCells(minX, minZ, maxX, maxZ)
+        WailaTrailTracer.buildTestOverlay(scan.polygonsByMaterial)
+        state.maxScanMs = math.max(state.maxScanMs or 0, (getTimeSec() - scanStartTime) * 1000)
+        state.totalCells = state.totalCells + scan.cellCount
+        for _, materialId in ipairs(SPLIT_MATERIALS) do
+            state.totalPolygons = state.totalPolygons + #(scan.polygonsByMaterial[materialId] or {})
+        end
+
+        currentChunkForestGrid = nil
+        state.phase = "forest"
+
+        state.col = state.col + 1
+        if state.col >= state.chunksPerSide then
+            state.col = 0
+            state.row = state.row + 1
+        end
+
+        if state.row >= state.chunksPerSide then
+            -- Forced regenerate: the last chunk(s) scanned just before
+            -- completion could easily land inside the throttle window
+            -- above and never get shown otherwise.
+            WailaTrailTracer.buildTestOverlay({}, true)
+            WailaTrailTracer.buildForestOverlayIncremental({}, true)
+            WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+            local elapsedMs = (getTimeSec() - state.startTime) * 1000
+            log("tickWholeMapScan done: %d chunk(s), %d cell(s), %d polygon(s), %d forest cell(s), %d forest polygon(s) / %d point(s), %d fine eval(s), %.0fms total (%.1fs)",
+                state.chunksPerSide * state.chunksPerSide, state.totalCells, state.totalPolygons,
+                state.totalForestCells or 0, state.totalForestPolygons or 0, state.totalForestPoints or 0, WailaTrailTracer.forestFineEvals, elapsedMs, elapsedMs / 1000)
+            log("tickWholeMapScan road layer: %d road cell(s), %d polygon(s), %.0fms total, worst frame %.0fms",
+                state.totalRoadCells or 0, state.totalRoadPolygons or 0, state.totalRoadMs or 0, state.maxRoadMs or 0)
+            log("tickWholeMapScan cost: forest %.0fms total, worst forest frame %.0fms; worst scan frame %.0fms (each chunk is two frames); %d edge floor cell(s) absorbed",
+                state.totalForestMs or 0, state.maxForestMs or 0, state.maxScanMs or 0, WailaTrailTracer.forestFloorAbsorbed)
+            WailaTrailTracer.wholeMapScanState = nil
+            return true
+        end
+        return false
+    end
+
     local chunkStartTime = getTimeSec()
-    local forestGrid, forestOriginX, forestOriginZ, forestSize, forestCellSize, forestEvaluated = rasterizeForestWindow(minX, minZ, math.ceil(state.chunkSize / WailaTrailTracer.FOREST_CELL_SIZE), WailaTrailTracer.FOREST_HALO_CELLS, WailaTrailTracer.FOREST_CELL_SIZE)
+    local forestGrid, forestOriginX, forestOriginZ, forestSize, forestCellSize, forestEvaluated, forestDisplayGrid = rasterizeForestWindow(minX, minZ, math.ceil(state.chunkSize / WailaTrailTracer.FOREST_CELL_SIZE), WailaTrailTracer.FOREST_HALO_CELLS, WailaTrailTracer.FOREST_CELL_SIZE)
     currentChunkForestGrid = forestGrid
     currentChunkForestOriginX = forestOriginX
     currentChunkForestOriginZ = forestOriginZ
     currentChunkForestCellSize = forestCellSize
     currentChunkForestSize = forestSize
 
-    local forestPolygons, forestCellCount = traceForestPolygonsFromGrid(forestGrid, forestOriginX, forestOriginZ, forestSize, forestCellSize)
+    -- Trace the DISPLAY grid (paths bridged); the scan keeps excluding
+    -- by the carved forestGrid above so paths are still scanned.
+    local forestPolygons, forestCellCount = traceForestPolygonsFromGrid(forestDisplayGrid or forestGrid, forestOriginX, forestOriginZ, forestSize, forestCellSize)
     WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, forestPolygons)
     local refinedMarks = nil
     if WailaTrailTracer.FOREST_DEBUG_MARK_REFINED and forestEvaluated ~= nil then
-        refinedMarks = { grid = forestGrid, evaluated = forestEvaluated, originX = forestOriginX, originZ = forestOriginZ, cellSize = forestCellSize }
+        refinedMarks = { grid = forestDisplayGrid or forestGrid, evaluated = forestEvaluated, originX = forestOriginX, originZ = forestOriginZ, cellSize = forestCellSize }
     end
     WailaTrailTracer.buildForestOverlayIncremental(forestPolygons, false, refinedMarks)
     state.totalForestCells = (state.totalForestCells or 0) + forestCellCount
@@ -4052,38 +5456,7 @@ function WailaTrailTracer.tickWholeMapScan()
     state.totalForestMs = (state.totalForestMs or 0) + forestMs
     state.maxForestMs = math.max(state.maxForestMs or 0, forestMs)
 
-    local scan = WailaTrailTracer.scanTileCells(minX, minZ, maxX, maxZ)
-    WailaTrailTracer.buildTestOverlay(scan.polygonsByMaterial)
-    state.maxChunkMs = math.max(state.maxChunkMs or 0, (getTimeSec() - chunkStartTime) * 1000)
-    state.totalCells = state.totalCells + scan.cellCount
-    for _, materialId in ipairs(SPLIT_MATERIALS) do
-        state.totalPolygons = state.totalPolygons + #(scan.polygonsByMaterial[materialId] or {})
-    end
-
-    currentChunkForestGrid = nil
-
-    state.col = state.col + 1
-    if state.col >= state.chunksPerSide then
-        state.col = 0
-        state.row = state.row + 1
-    end
-
-    if state.row >= state.chunksPerSide then
-        -- Forced regenerate: the last chunk(s) scanned just before
-        -- completion could easily land inside the throttle window above
-        -- and never get shown otherwise.
-        WailaTrailTracer.buildTestOverlay({}, true)
-        WailaTrailTracer.buildForestOverlayIncremental({}, true)
-        local elapsedMs = (getTimeSec() - state.startTime) * 1000
-        log("tickWholeMapScan done: %d chunk(s), %d cell(s), %d polygon(s), %d forest cell(s), %d forest polygon(s) / %d point(s), %d fine eval(s), %.0fms total (%.1fs)",
-            state.chunksPerSide * state.chunksPerSide, state.totalCells, state.totalPolygons,
-            state.totalForestCells or 0, state.totalForestPolygons or 0, state.totalForestPoints or 0, WailaTrailTracer.forestFineEvals, elapsedMs, elapsedMs / 1000)
-        log("tickWholeMapScan forest cost: %.0fms total, worst chunk %.0fms; worst whole chunk %.0fms (per-frame hitch risk)",
-            state.totalForestMs or 0, state.maxForestMs or 0, state.maxChunkMs or 0)
-        WailaTrailTracer.wholeMapScanState = nil
-        return true
-    end
-
+    state.phase = "road"
     return false
 end
 
@@ -4409,6 +5782,7 @@ function WailaTrailTracer.tickLoadFromXML()
     -- window and never actually show without this.
     WailaTrailTracer.buildTestOverlay({}, true)
     WailaTrailTracer.buildForestOverlayIncremental({}, true)
+    WailaTrailTracer.buildRoadSplineOverlay()
     state.xmlFile:delete()
 
     WailaTrailTracer.savedRegionsByMaterial = state.loadedRegions
