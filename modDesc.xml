@@ -34,6 +34,7 @@
         <sourceFile filename="scripts/WailaFieldGridScanner.lua" />
         <sourceFile filename="scripts/WailaFieldBoundaryTracer.lua" />
         <sourceFile filename="scripts/WailaTrailTracer.lua" />
+        <sourceFile filename="scripts/WailaLayerScan.lua" />
         <sourceFile filename="scripts/WailaFieldIndex.lua" />
         <sourceFile filename="scripts/WailaAreaIndex.lua" />
         <sourceFile filename="scripts/WailaAreaTracker.lua" />

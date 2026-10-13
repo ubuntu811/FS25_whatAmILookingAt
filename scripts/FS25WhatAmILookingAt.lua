@@ -158,6 +158,7 @@ function FS25WhatAmILookingAt:setupComponents()
         { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
         { label = "Learn layer classes (road from splines, forest from classifier)", run = function() WailaTrailTracer.learnLayerClasses() end },
         { label = "Build layer-class overlay near player (road orange, forest green)", run = function() mod:onBuildLayerClassOverlay() end },
+        { label = "NEW layer scan (whole map) -- compare with Shift+G", run = function() WailaTrailTracer.startLayerScan() end },
         { label = "Rescan ROAD LAYER only (whole map, about a minute)", run = function() WailaTrailTracer.startRoadLayerOnlyScan() end },
         { label = "TOGGLE overlay debug colours (loud, distinct per layer)", run = function() WailaTrailTracer.toggleDebugColors() end },
         { label = "Build layer+material PAIR overlay near player (top 7 colour-coded, legend in log)", run = function() mod:onBuildLayerPairOverlay() end },

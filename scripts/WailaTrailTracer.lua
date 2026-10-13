@@ -3586,6 +3586,10 @@ function WailaTrailTracer.tickWholeMapScanStep()
         return true
     end
 
+    if state.layerMode then
+        return WailaTrailTracer.tickLayerScanStep(state)
+    end
+
     local minX, minZ = state.originX + state.col * state.chunkSize, state.originZ + state.row * state.chunkSize
     local maxX, maxZ = minX + state.chunkSize, minZ + state.chunkSize
 
@@ -4030,3 +4034,8 @@ function WailaTrailTracer.tickLoadFromXML()
     WailaTrailTracer.loadState = nil
     return true
 end
+
+-- Exposed for WailaLayerScan.lua: a separate file cannot see this chunk's locals.
+WailaTrailTracer.traceMaskPolygons = traceForestPolygonsFromGrid
+WailaTrailTracer.openMask = openMask
+WailaTrailTracer.cleanComponents = smoothForestGrid
