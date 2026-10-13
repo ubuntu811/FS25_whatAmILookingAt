@@ -153,12 +153,8 @@ function FS25WhatAmILookingAt:setupComponents()
     registerActionTab("terrain", "Terrain", {
         { label = "Dump terrain layers", run = function() mod:onDumpTerrainLayers() end },
         { label = "Paint layer test row", run = function() mod:onPlaceTerrainLayerTestRow() end },
-        { label = "Dump density probe", run = function() mod:onDumpDensityProbe() end },
-        { label = "Dump ground layer dataPlane probe", run = function() mod:onDumpGroundDensityProbe() end },
-        { label = "Dump road nodes", run = function() mod:onDumpRoadNodes() end },
         { label = "Build road overlay (from real splines)", run = function() mod:onBuildRoadOverlay() end },
         { label = "Build tree/water overlay near player", run = function() mod:onBuildFeatureOverlay() end },
-        { label = "Build forest overlay near player (diversity classifier)", run = function() mod:onBuildForestOverlay() end },
         { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
         { label = "Learn layer classes (road from splines, forest from classifier)", run = function() WailaTrailTracer.learnLayerClasses() end },
         { label = "Build layer-class overlay near player (road orange, forest green)", run = function() mod:onBuildLayerClassOverlay() end },
@@ -482,28 +478,6 @@ function FS25WhatAmILookingAt:onPlaceTerrainLayerTestRow()
     self.debugTools:placeTerrainLayerTestRow(self.current.hit.x, self.current.hit.z)
 end
 
-function FS25WhatAmILookingAt:onDumpDensityProbe()
-    if self.current == nil or self.current.hit == nil then
-        log("[DensityProbe] No current terrain target")
-        return
-    end
-
-    self.debugTools:dumpDensityProbe(self.current.hit.x, self.current.hit.y, self.current.hit.z)
-end
-
-function FS25WhatAmILookingAt:onDumpGroundDensityProbe()
-    if self.current == nil or self.current.hit == nil then
-        log("[GroundProbe] No current terrain target")
-        return
-    end
-
-    self.debugTools:dumpGroundDensityProbe(self.current.hit.x, self.current.hit.y, self.current.hit.z)
-end
-
-function FS25WhatAmILookingAt:onDumpRoadNodes()
-    self.debugTools:dumpRoadNodes()
-end
-
 function FS25WhatAmILookingAt:onBuildRoadOverlay()
     local success, splineCountOrReason, polygonCount = WailaTrailTracer.buildRoadSplineOverlay()
     if success then
@@ -541,18 +515,6 @@ function FS25WhatAmILookingAt:onBuildLayerPairOverlay()
         return
     end
     WailaTrailTracer.buildLayerPairOverlay(x, z)
-end
-
-function FS25WhatAmILookingAt:onBuildForestOverlay()
-    if self.current == nil or self.current.hit == nil then
-        log("[ForestOverlay] No current terrain target")
-        return
-    end
-
-    local success, cellCount, polygonCount, elapsedMs = WailaTrailTracer.buildForestOverlay(self.current.hit.x, self.current.hit.z)
-    if success then
-        log("[ForestOverlay] %d cell(s), %d polygon(s), %.0fms", cellCount, polygonCount, elapsedMs)
-    end
 end
 
 function FS25WhatAmILookingAt:onBuildFeatureOverlay()
