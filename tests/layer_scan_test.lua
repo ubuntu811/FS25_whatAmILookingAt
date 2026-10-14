@@ -76,4 +76,74 @@ do
     check("a yard is not forest", #yard.forest == 0)
 end
 
+
+-- Trees instead of a forest layer (a map where the forest is "grass with trees"): a grove of trunks
+-- every 5 m inside a disc r=16 at (32,32), one isolated tree, and a 3 m dirt path through the grove.
+do
+    local trunks = {}
+    for gx = 16, 48, 5 do
+        for gz = 16, 48, 5 do
+            if (gx - 32) ^ 2 + (gz - 32) ^ 2 <= 16 * 16 then trunks[#trunks + 1] = { gx, gz } end
+        end
+    end
+    trunks[#trunks + 1] = { 58, 8 }                       -- the lone tree
+    overlapBox = function(x, y, z, rx, ry, rz, ex, ey, ez, callbackName, target, mask)
+        local count = 0
+        for _, tr in ipairs(trunks) do
+            if math.abs(tr[1] - x) <= ex and math.abs(tr[2] - z) <= ez then count = count + 1 end
+        end
+        return count
+    end
+    T.foliageAvailable = function() return false end
+    T.getLayerCellAt = function(x, z)
+        if x >= 0 and x <= 64 and math.abs(z - 32) <= 1.5 then return nil, 1 end    -- dirt path (E-W through the grove)
+        return nil, 2
+    end
+    local tree = T.scanLayerChunk(0, 0, 64)
+    check("trees: one forest polygon from trunk counts alone (no forest layer)", tree ~= nil and #tree.forest == 1)
+    check("trees: forest roughly the grove disc (area between 0.6x and 1.8x of a 16 m disc)", totalArea(tree.forest) > 0.6 * math.pi * 256 and totalArea(tree.forest) < 1.8 * math.pi * 256)
+    local pathArea = totalArea(tree.trail)
+    check("trees: the dirt path through the grove survives as a trail (about 3 x 64 = 192 m2)", pathArea > 110 and pathArea < 260)
+    local loneTreeIsForest = false
+    for _, p in ipairs(tree.forest) do
+        local cx, cz = 0, 0
+        for _, q in ipairs(p) do cx, cz = cx + q[1], cz + q[2] end
+        if cx / #p > 50 then loneTreeIsForest = true end
+    end
+    check("trees: an isolated tree is not a forest", not loneTreeIsForest)
+    overlapBox = nil
+    T.getLayerCellAt = function() return nil, 2 end
+    check("no overlapBox in the engine: no trees, chunk is empty", T.scanLayerChunk(0, 0, 64) == nil)
+end
+
+
+-- Stone hills: stone material on a layer of its own is built ground on flat land (the pad above) but a rock
+-- face where it is steep. Flat stone x 4..20, steep stone x 24..44 (1 m rise per metre), flat stone x 48..60.
+do
+    T.foliageAvailable = function() return false end
+    T.hasFoliageAt = function() return false end
+    overlapBox = nil
+    getTerrainHeightAtWorldPos = function(node, x, y, z)
+        if x < 24 then return 100 end
+        if x < 44 then return 100 + (x - 24) end
+        return 120
+    end
+    T.getLayerCellAt = function(x, z)
+        if z >= 20 and z <= 44 and x >= 4 and x <= 60 then return nil, 7 end
+        return nil, 2
+    end
+    local hills = T.scanLayerChunk(0, 0, 64)
+    local flatArea, steepLeak = 0, false
+    for _, p in ipairs(hills.trail) do
+        local cx, cz = 0, 0
+        for _, q in ipairs(p) do cx, cz = cx + q[1], cz + q[2] end
+        cx = cx / #p
+        flatArea = flatArea + polygonArea(p)
+        if cx > 26 and cx < 42 then steepLeak = true end
+    end
+    check("stone hills: the flat stone ground on both sides is still worn ground", flatArea > 200)
+    check("stone hills: the steep stone slope is not drawn as worn ground", not steepLeak)
+    getTerrainHeightAtWorldPos = function() return 100 end
+end
+
 finish("layer_scan_test")

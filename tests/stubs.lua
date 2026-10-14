@@ -24,6 +24,8 @@ WailaUtil = { safeCall = function(_, f, ...) return f(...) end }
 g_currentMission = { terrainSize = 4096 }
 FSDensityMapUtil = { getFieldDataAtWorldPosition = function() return false end }
 getTimeSec = os.clock
+g_terrainNode = 1
+getTerrainHeightAtWorldPos = function() return 100 end
 
 function loadTracer()
     dofile("scripts/WailaTrailTracer.lua")

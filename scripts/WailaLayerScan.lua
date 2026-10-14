@@ -6,7 +6,8 @@
     layer class (road / forest-floor / neither) and the material id, and the
     rest follows from shape.
 
-      forest  = forest-floor-layer cells WITH foliage. The forest-floor layer alone
+      forest  = trees (trunk collision counted per 4m cell: the signal that works on
+                any map, e.g. grass with trees) OR forest-floor-layer cells WITH foliage. The forest-floor layer alone
                 is not enough: a parking lot or a worn path carries the same
                 layer, but its foliage is empty (wear and placeables clear it)
       trail   = worn ground: dirt or gravel material outside the road layer and
@@ -33,8 +34,12 @@ WailaTrailTracer.LAYER_SCAN_HALO_CELLS = 4
 -- Closing radius for the forest mask: foliage is patchy, a single missing sample
 -- must not punch a hole in the forest.
 WailaTrailTracer.LAYER_SCAN_FOREST_CLOSE_RADIUS = 1
--- Worn ground stays this many cells away from the forest area.
+-- Small worn patches stay this many cells away from the forest area (forest-floor dirt
+-- among the trees is not a trail)...
 WailaTrailTracer.LAYER_SCAN_TRAIL_EDGE_GAP_CELLS = 1
+-- ...but a connected worn component of at least this many cells is a path or a yard, kept
+-- wherever it lies: a path through the woods is a long strip, a floor patch is a blob.
+WailaTrailTracer.LAYER_SCAN_TRAIL_KEEP_CELLS = 40
 -- Position-independent island/hole rule (a component touching the window edge
 -- is never judged, so seams are consistent): smaller than this is dropped.
 WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS = 25
@@ -51,6 +56,42 @@ WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE = 1.0
 -- materials that mean worn ground outside the learned classes (DIRT, GRAVEL)
 local WORN_MATERIALS = { [1] = true, [6] = true }
 local STONE_MATERIAL = 7
+
+-- Trees: a standing tree has a static collision body with the TREE bit; overlapBox
+-- returns the NUMBER of overlapping shapes, so one call per cell counts trunks.
+-- A forest is where trunks are, however the ground under them was painted.
+WailaTrailTracer.TREE_CELL_SIZE = 4.0
+WailaTrailTracer.TREE_MIN_COUNT = 1
+-- closing radius (in 2m cells) that joins the gaps between trunks into one area
+WailaTrailTracer.TREE_CLOSE_RADIUS = 2
+local TREE_BOX_HALF_HEIGHT = 25
+local treeOverlapTarget = {}
+function treeOverlapTarget:onTreeOverlap(nodeId)
+    return false
+end
+
+-- Number of tree trunks within a box of half-size `half` around (x, z); 0 if the
+-- engine function is missing.
+function WailaTrailTracer.countTrees(x, z, half)
+    if overlapBox == nil then
+        return 0
+    end
+    local y = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z) + 15
+    return overlapBox(x, y, z, 0, 0, 0, half, TREE_BOX_HALF_HEIGHT, half, "onTreeOverlap", treeOverlapTarget, CollisionFlag.TREE, false, false, true, false) or 0
+end
+
+-- Rock: the same stone layer that is a placeable's flat pad on one map is a cliff or
+-- a stone hill on another (Pirambeiras: the big scenic hills read as stone, single
+-- layer, nothing else). A pad is flat, a rock face is steep: stone ground steeper than
+-- this (rise over run across one cell) is left to the base map, not drawn as built ground.
+WailaTrailTracer.LAYER_SCAN_ROCK_SLOPE = 0.45
+
+local function isSteepAt(x, z, cell)
+    local h0 = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z)
+    local hx = getTerrainHeightAtWorldPos(g_terrainNode, x + cell, 0, z)
+    local hz = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z + cell)
+    return math.max(math.abs(hx - h0), math.abs(hz - h0)) / cell > WailaTrailTracer.LAYER_SCAN_ROCK_SLOPE
+end
 
 -- Worn / built ground: dirt or gravel material, or stone material on a layer that
 -- is neither road nor forest floor. The second case is a placeable's own ground
@@ -158,9 +199,16 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
     local roadClass, forestClass = WailaTrailTracer.LAYER_CLASS_ROAD, WailaTrailTracer.LAYER_CLASS_FOREST
     local cellAt = WailaTrailTracer.getLayerCellAt
 
+    -- trees: one overlap query over the whole window says whether any trunk is here
+    local windowHalf = w * cell * 0.5
+    local treesInWindow = overlapBox ~= nil and WailaTrailTracer.countTrees(winX + windowHalf, winZ + windowHalf, windowHalf) > 0
+
     -- prefilter: every 2nd cell in both axes; most chunks hold nothing
-    local anyHit = false
+    local anyHit = treesInWindow
     for row = 0, w - 1, 2 do
+        if anyHit then
+            break
+        end
         local z = winZ + (row + 0.5) * cell
         if z > -half and z < half then
             for col = 0, w - 1, 2 do
@@ -187,6 +235,38 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
     local hasFoliageAt = WailaTrailTracer.hasFoliageAt
     local forestMask, wornMask = {}, {}
     local roadInChunk, forestCells, wornCells = false, 0, 0
+
+    -- tree cells (4m): a cell with enough trunks marks its 2m cells; closed below
+    local treeMask = nil
+    if treesInWindow then
+        treeMask = newMask(w, false)
+        local treeCell = WailaTrailTracer.TREE_CELL_SIZE
+        local per = math.max(1, math.floor(treeCell / cell + 0.5))
+        local treeHalf = treeCell * 0.5
+        local minCount = WailaTrailTracer.TREE_MIN_COUNT
+        for row = 0, w - 1, per do
+            local z = winZ + (row + per * 0.5) * cell
+            if z > -half and z < half then
+                for col = 0, w - 1, per do
+                    local x = winX + (col + per * 0.5) * cell
+                    if x > -half and x < half and WailaTrailTracer.countTrees(x, z, treeHalf) >= minCount then
+                        for dr = 0, per - 1 do
+                            for dc = 0, per - 1 do
+                                if row + dr < w and col + dc < w then
+                                    treeMask[row + dr][col + dc] = true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        local closeRadius = WailaTrailTracer.TREE_CLOSE_RADIUS
+        if closeRadius > 0 then
+            treeMask = erodeMask(dilateMask(treeMask, w, closeRadius), w, closeRadius)
+        end
+    end
+
     for row = 0, w - 1 do
         local line, wornLine = {}, {}
         local z = winZ + (row + 0.5) * cell
@@ -196,12 +276,18 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
             if x > -half and x < half and z > -half and z < half then
                 local class, materialId = cellAt(x, z)
                 worn = isWornCell(class, materialId, roadClass)
+                if worn and class == nil and materialId == STONE_MATERIAL and isSteepAt(x, z, cell) then
+                    worn = false
+                end
                 isForest = class == forestClass and (not useFoliage or hasFoliageAt(x, z))
                 if (isForest or worn) and FSDensityMapUtil.getFieldDataAtWorldPosition(x, 0, z) then
                     isForest, worn = false, false
                 elseif class == roadClass and row >= halo and row < halo + n and col >= halo and col < halo + n then
                     roadInChunk = true
                 end
+            end
+            if treeMask ~= nil and treeMask[row][col] then
+                isForest = true
             end
             line[col] = isForest
             wornLine[col] = worn
@@ -233,10 +319,18 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
         if wornCells > 0 then
             if forestCells > 0 then
                 local near = dilateMask(area, w, WailaTrailTracer.LAYER_SCAN_TRAIL_EDGE_GAP_CELLS)
+                -- the big worn components, kept even inside the forest area's margin
+                local big = newMask(w, false)
+                for row = 0, w - 1 do
+                    for col = 0, w - 1 do
+                        big[row][col] = wornMask[row][col]
+                    end
+                end
+                WailaTrailTracer.cleanComponents(big, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_TRAIL_KEEP_CELLS, 0)
                 trail, trailCells = newMask(w, false), 0
                 for row = 0, w - 1 do
                     for col = 0, w - 1 do
-                        if wornMask[row][col] and not near[row][col] then
+                        if wornMask[row][col] and (big[row][col] or not near[row][col]) then
                             trail[row][col] = true
                             trailCells = trailCells + 1
                         end
