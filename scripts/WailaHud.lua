@@ -632,7 +632,21 @@ function WailaHud:draw(inspection, areaSize, areaStep)
             elseif WailaTrailTracer.layerClassLearned and roadPercent >= 60 then
                 verdict = string.format("ROAD (learned layer, %.0f%%)", roadPercent)
             elseif WailaTrailTracer.layerClassLearned and forestPercent >= 60 then
-                verdict = string.format("FOREST FLOOR (learned layers, %.0f%%)", forestPercent)
+                -- the forest-floor layer alone is not forest: a parking lot or a worn path
+                -- carries it too, but its foliage is empty
+                local foliageEmpty = 0
+                if inspection.foliageArea ~= nil then
+                    for _, row in ipairs(inspection.foliageArea.foliage) do
+                        if row.name == "<empty>" then
+                            foliageEmpty = row.percent
+                        end
+                    end
+                end
+                if foliageEmpty >= 80 then
+                    verdict = string.format("bare ground on the forest-floor layer (yard / parking lot / worn path), foliage %.0f%% empty", foliageEmpty)
+                else
+                    verdict = string.format("FOREST (forest-floor layer %.0f%% + foliage)", forestPercent)
+                end
             elseif topMaterial ~= nil and topMaterial.name == "GRASS" and topMaterial.percent >= 60 then
                 verdict = "grass ground (meadow / verge-like)"
             elseif topMaterial ~= nil and topMaterial.percent >= 90 and topLayer ~= nil and topLayer.percent >= 90 then

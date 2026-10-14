@@ -2,14 +2,19 @@ dofile("tests/stubs.lua")
 local T = loadTracer()
 T.layerClassLearned = true
 
--- Synthetic chunk (0..64): forest disc r=18 at (30,30) with dirt flecks among grass;
--- an IW-style worn path (gravel material, 3m wide, (0,55)->(64,45)) whose LAYER signal is only dashes;
--- a road 4m wide along z=10.
+-- Synthetic chunk (0..64):
+--  * forest disc r=12 at (18,30): forest-floor layer WITH foliage, dirt flecks among grass
+--  * parking lot x 36..56, z 16..34: the SAME forest-floor layer, DIRT material, NO foliage
+--  * IW-style worn path (gravel, 3m wide, (0,55)->(64,45)) whose layer signal is only dashes
+--  * road 4m wide along z=10
+T.foliageAvailable = function() return true end
+T.hasFoliageAt = function(x, z) return (x - 18) ^ 2 + (z - 30) ^ 2 <= 12 * 12 end
 local function world(x, z)
     if math.abs(z - 10) <= 2 then return T.LAYER_CLASS_ROAD, 7 end
-    if (x - 30) ^ 2 + (z - 30) ^ 2 <= 18 * 18 then
+    if (x - 18) ^ 2 + (z - 30) ^ 2 <= 12 * 12 then
         return T.LAYER_CLASS_FOREST, (math.floor(x / 3) % 4 == 0) and 1 or 2
     end
+    if x >= 36 and x <= 56 and z >= 16 and z <= 34 then return T.LAYER_CLASS_FOREST, 1 end
     local lz = 55 - (10 / 64) * x
     if math.abs(z - lz) <= 1.5 and x >= 0 and x <= 64 then
         return (math.floor(x / 6) % 3 == 0) and T.LAYER_CLASS_FOREST or nil, 6
@@ -21,20 +26,29 @@ T.scanRoadLayerChunk = function() return { { { 0, 8 }, { 64, 8 }, { 64, 12 }, { 
 
 local r = T.scanLayerChunk(0, 0, 64)
 check("chunk with content returns a result", r ~= nil)
-check("forest: one polygon", #r.forest == 1)
-local disc = math.pi * 18 * 18
+check("forest: exactly one polygon (the foliage disc, not the parking lot)", #r.forest == 1)
+local disc = math.pi * 12 * 12
 check("forest area within 12% of the disc", math.abs(totalArea(r.forest) / disc - 1) < 0.12)
-check("worn path becomes trail polygon(s)", #r.trail >= 1)
-check("path is continuous, not dashes", #r.trail <= 2)
-check("trail area plausible (3m x 64m minus the part by the disc)", totalArea(r.trail) > 192 * 0.6 and totalArea(r.trail) < 192 * 1.4)
-local leak = false
-for _, p in ipairs(r.trail) do
+local function centroid(p)
     local cx, cz = 0, 0
     for _, q in ipairs(p) do cx, cz = cx + q[1], cz + q[2] end
-    cx, cz = cx / #p, cz / #p
-    if (cx - 30) ^ 2 + (cz - 30) ^ 2 < 14 * 14 then leak = true end
+    return cx / #p, cz / #p
 end
-check("forest-floor dirt inside the area is not a trail", not leak)
+local fx, fz = centroid(r.forest[1])
+check("the forest polygon is the disc, not the lot", fx < 30)
+local lotTrail, pathTrail = 0, 0
+for _, p in ipairs(r.trail) do
+    local cx, cz = centroid(p)
+    if cx >= 36 and cx <= 56 and cz >= 16 and cz <= 34 then lotTrail = lotTrail + polygonArea(p) else pathTrail = pathTrail + polygonArea(p) end
+end
+check("parking lot is worn ground (trail layer), about 360 m2", lotTrail > 280 and lotTrail < 440)
+check("worn path is a continuous trail, about 190 m2", pathTrail > 120 and pathTrail < 260)
+local leak = false
+for _, p in ipairs(r.trail) do
+    local cx, cz = centroid(p)
+    if (cx - 18) ^ 2 + (cz - 30) ^ 2 < 8 * 8 then leak = true end
+end
+check("forest-floor dirt inside the forest area is not a trail", not leak)
 check("road comes from the road pass", #r.road == 1)
 local points = 0
 for _, list in ipairs({ r.forest, r.trail }) do for _, p in ipairs(list) do points = points + #p end end

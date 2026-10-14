@@ -1238,6 +1238,51 @@ function WailaTrailTracer.getLayerClassOfFingerprint(text)
     return layerClassByKey[layerKey(tonumber(r), tonumber(g), tonumber(b), tonumber(w))]
 end
 
+-- Foliage presence at a point. Real finding (parking lot read as forest): the lot
+-- carries the forest-floor LAYER but its foliage is empty, while real forest is
+-- full of groundFoliage / forestPlants / decoBush. Reads the foliage density
+-- planes that carry type information (WailaFoliageInspector resolves them, see
+-- its header): about two reads per call on this map. nil when the map has none,
+-- so callers can fall back to "assume foliage".
+local foliagePlanes = nil
+local function resolveFoliagePlanes()
+    if foliagePlanes ~= nil then
+        return foliagePlanes
+    end
+    foliagePlanes = {}
+    if WailaFoliageInspector ~= nil then
+        local inspector = WailaFoliageInspector.new()
+        local data = inspector:loadFoliageDebugData()
+        if data ~= nil then
+            inspector:resolveFoliagePlaneIds(data)
+            for _, layer in ipairs(data.multilayers) do
+                if layer.terrainDataPlaneId ~= nil and (layer.numTypeIndexChannels or 0) > 0 then
+                    foliagePlanes[#foliagePlanes + 1] = {
+                        id = layer.terrainDataPlaneId,
+                        channels = layer.numTypeIndexChannels,
+                        typeMask = 2 ^ layer.numTypeIndexChannels - 1,
+                    }
+                end
+            end
+        end
+    end
+    return foliagePlanes
+end
+
+function WailaTrailTracer.foliageAvailable()
+    return #resolveFoliagePlanes() > 0
+end
+
+function WailaTrailTracer.hasFoliageAt(x, z)
+    for _, plane in ipairs(foliagePlanes or resolveFoliagePlanes()) do
+        local bits = getDensityAtWorldPos(plane.id, x, 0, z)
+        if bits > 0 and bitAND(bits, plane.typeMask) > 0 and bitShiftRight(bits, plane.channels) > 0 then
+            return true
+        end
+    end
+    return false
+end
+
 -- One terrain read, both answers: the learned class (nil = open ground,
 -- details, ...) and the position's material id.
 function WailaTrailTracer.getLayerCellAt(x, z)
@@ -1322,62 +1367,11 @@ function WailaTrailTracer.learnLayerClasses()
         roadKeys, forestKeys, splineCount, splineTotal, mapTotal, (getTimeSec() - startTime) * 1000)
 end
 
--- Thin vs area (real design point: "the difference between IW tracks and
--- forest is that one is a line, the other an area"). Morphological OPENING
--- of a boolean mask: erode, then dilate, with a square (2r+1) kernel -- any
--- structure narrower than the kernel disappears, areas survive. mask is
--- mask[z][x] over 0..n-1; cells outside the window are skipped (not treated
--- as empty), so the window border does not eat into areas.
-WailaTrailTracer.LAYER_THIN_RADIUS = 3
-
-local function filterLine(line, n, radius, erode)
-    local out = {}
-    for i = 0, n - 1 do
-        local result = erode
-        for j = math.max(0, i - radius), math.min(n - 1, i + radius) do
-            if erode then
-                if not line[j] then
-                    result = false
-                    break
-                end
-            elseif line[j] then
-                result = true
-                break
-            end
-        end
-        out[i] = result
-    end
-    return out
-end
-
-local function openMask(mask, n, radius)
-    local function pass(source, erode)
-        local rows = {}
-        for z = 0, n - 1 do
-            rows[z] = filterLine(source[z], n, radius, erode)
-        end
-        local result = {}
-        for z = 0, n - 1 do
-            result[z] = {}
-        end
-        for x = 0, n - 1 do
-            local column = {}
-            for z = 0, n - 1 do
-                column[z] = rows[z][x]
-            end
-            local filtered = filterLine(column, n, radius, erode)
-            for z = 0, n - 1 do
-                result[z][x] = filtered[z]
-            end
-        end
-        return result
-    end
-    return pass(pass(mask, true), false)
-end
-
 -- Debug overlay: classify a square of 1m cells around (x, z) with the learned
--- table, one terrain read per cell, and draw road (value 1) and forest
--- (value 2) as row-run rectangles on their own overlay (TaskMap draws it).
+-- table, one terrain read per cell, and draw as row-run rectangles on their own
+-- overlay (TaskMap draws it): road (value 1), forest = forest-floor layer WITH
+-- foliage (value 2), forest-floor layer WITHOUT foliage (value 3: parking lot,
+-- worn path, clearing).
 WailaTrailTracer.LAYER_OVERLAY_HALF_SIZE = 96
 function WailaTrailTracer.buildLayerClassOverlay(centerX, centerZ)
     if not WailaTrailTracer.layerClassLearned then
@@ -1398,39 +1392,28 @@ function WailaTrailTracer.buildLayerClassOverlay(centerX, centerZ)
     local cellsPerSide = half * 2
     local rects, reads = 0, 0
 
-    -- pass 1: one terrain read per cell -> class grid
-    local classGrid, forestMask = {}, {}
+    -- pass 1: one terrain read per cell (+ foliage for forest-layer cells) -> class grid
+    local classGrid = {}
+    local useFoliage = WailaTrailTracer.foliageAvailable()
+    local forestCells, bareCells = 0, 0
     for zi = 0, cellsPerSide - 1 do
-        local classRow, forestRow = {}, {}
+        local classRow = {}
         local z = minZ + zi + 0.5
         for xi = 0, cellsPerSide - 1 do
-            local class = WailaTrailTracer.getLayerClassAt(minX + xi + 0.5, z)
+            local x = minX + xi + 0.5
+            local class = WailaTrailTracer.getLayerClassAt(x, z)
             reads = reads + 1
-            classRow[xi] = class
-            forestRow[xi] = class == WailaTrailTracer.LAYER_CLASS_FOREST
-        end
-        classGrid[zi] = classRow
-        forestMask[zi] = forestRow
-    end
-
-    -- pass 2: forest-layer cells that do not survive the opening are THIN
-    -- (value 3); the rest is forest AREA (value 2)
-    local thinCells, areaCells = 0, 0
-    local radius = WailaTrailTracer.LAYER_THIN_RADIUS
-    if radius > 0 then
-        local opened = openMask(forestMask, cellsPerSide, radius)
-        for zi = 0, cellsPerSide - 1 do
-            for xi = 0, cellsPerSide - 1 do
-                if forestMask[zi][xi] then
-                    if opened[zi][xi] then
-                        areaCells = areaCells + 1
-                    else
-                        classGrid[zi][xi] = 3
-                        thinCells = thinCells + 1
-                    end
+            if class == WailaTrailTracer.LAYER_CLASS_FOREST then
+                if useFoliage and not WailaTrailTracer.hasFoliageAt(x, z) then
+                    class = 3
+                    bareCells = bareCells + 1
+                else
+                    forestCells = forestCells + 1
                 end
             end
+            classRow[xi] = class
         end
+        classGrid[zi] = classRow
     end
 
     -- pass 3: draw row runs
@@ -1462,8 +1445,8 @@ function WailaTrailTracer.buildLayerClassOverlay(centerX, centerZ)
     setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.layerClassOverlay, WailaTrailTracer.layerClassOverlayMap, 0, 0, 0, 3, WailaTrailTracer.LAYER_CLASS_FOREST, 0.0, 0.9, 0.4)
     setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.layerClassOverlay, WailaTrailTracer.layerClassOverlayMap, 0, 0, 0, 3, 3, 1.0, 0.0, 1.0)
     generateDensityMapVisualizationOverlay(WailaTrailTracer.layerClassOverlay)
-    log("buildLayerClassOverlay: %dx%dm around %.0f/%.0f, %d read(s), forest area %d cell(s) / thin %d cell(s) (opening radius %d), %d rectangle(s), %.0fms",
-        half * 2, half * 2, centerX, centerZ, reads, areaCells, thinCells, radius, rects, (getTimeSec() - startTime) * 1000)
+    log("buildLayerClassOverlay: %dx%dm around %.0f/%.0f, %d read(s), forest %d cell(s), forest layer without foliage %d cell(s), %d rectangle(s), %.0fms",
+        half * 2, half * 2, centerX, centerZ, reads, forestCells, bareCells, rects, (getTimeSec() - startTime) * 1000)
 end
 
 -- protectedGrid marks cells that are false for a real, ground-truth
@@ -2701,5 +2684,4 @@ end
 
 -- Exposed for WailaLayerScan.lua: a separate file cannot see this chunk's locals.
 WailaTrailTracer.traceMaskPolygons = traceForestPolygonsFromGrid
-WailaTrailTracer.openMask = openMask
 WailaTrailTracer.cleanComponents = smoothForestGrid
