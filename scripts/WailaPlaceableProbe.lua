@@ -11,6 +11,12 @@
     field each one came from, and draws the rectangles on the layer-class
     overlay (white) so they can be compared with the ground layer. Which spec
     carries the real outline is not known up front, hence the log.
+
+    A building is rarely one rectangle (an L-shaped factory is several wings),
+    so rectangles are painted into the same bitmap value: the picture is their
+    union. Second source: the placeable's own collision shapes (static object /
+    building flags) walked from its root node, each drawn as its bounding box
+    (yellow), which follows the walls more closely than placement test areas.
 ]]
 
 WailaPlaceableProbe = {}
@@ -103,6 +109,69 @@ function WailaPlaceableProbe.collectAreas(placeable)
     return found
 end
 
+local MAX_NODES = 4000
+
+-- World x/z corners of a node's local bounding box, or nil if the engine
+-- function is not available / returns nothing usable.
+local function shapeBoxCorners(node)
+    if getShapeBoundingBox == nil then
+        return nil
+    end
+    local ok, minX, minY, minZ, maxX, maxY, maxZ = pcall(getShapeBoundingBox, node)
+    if not ok or maxZ == nil or type(minX) ~= "number" then
+        return nil
+    end
+    local corners = {}
+    for _, c in ipairs({ { minX, minZ }, { maxX, minZ }, { maxX, maxZ }, { minX, maxZ } }) do
+        local okWorld, wx, _, wz = pcall(localToWorld, node, c[1], 0, c[2])
+        if not okWorld or wx == nil then
+            return nil
+        end
+        corners[#corners + 1] = { wx, wz }
+    end
+    return corners
+end
+
+local function isCollisionShape(node)
+    if getHasClassId ~= nil and ClassIds ~= nil and ClassIds.SHAPE ~= nil then
+        local ok, isShape = pcall(getHasClassId, node, ClassIds.SHAPE)
+        if not ok or not isShape then
+            return false
+        end
+    end
+    if CollisionFlag == nil or CollisionFlag.getHasGroupFlagSet == nil then
+        return false
+    end
+    local ok, hasStatic = pcall(CollisionFlag.getHasGroupFlagSet, node, CollisionFlag.STATIC_OBJECT)
+    local ok2, hasBuilding = pcall(CollisionFlag.getHasGroupFlagSet, node, CollisionFlag.BUILDING)
+    return (ok and hasStatic) or (ok2 and hasBuilding)
+end
+
+-- Collision shapes under a placeable's root node -> { { name, corners }, ... }.
+function WailaPlaceableProbe.collectShapeBoxes(rootNode)
+    local boxes, visited = {}, 0
+    local function walk(node, depth)
+        if visited > MAX_NODES or depth > 14 then
+            return
+        end
+        visited = visited + 1
+        if isCollisionShape(node) then
+            local corners = shapeBoxCorners(node)
+            if corners ~= nil then
+                local okName, name = pcall(getName, node)
+                boxes[#boxes + 1] = { name = okName and name or "?", corners = corners }
+            end
+        end
+        if getNumOfChildren ~= nil and getChildAt ~= nil then
+            for index = 0, getNumOfChildren(node) - 1 do
+                walk(getChildAt(node, index), depth + 1)
+            end
+        end
+    end
+    pcall(walk, rootNode, 0)
+    return boxes, visited
+end
+
 local function placeableName(placeable)
     local ok, name = pcall(function() return placeable:getName() end)
     if ok and name ~= nil then
@@ -118,8 +187,11 @@ function WailaPlaceableProbe.run(centerX, centerZ)
         return
     end
 
-    local polygons, perPath = {}, {}
-    local placeablesSeen, withAreas, detailed = 0, 0, 0
+    log("engine functions: getShapeBoundingBox=%s getHasClassId=%s getNumOfChildren=%s getChildAt=%s worldToLocal=%s CollisionFlag.getHasGroupFlagSet=%s",
+        type(getShapeBoundingBox), type(getHasClassId), type(getNumOfChildren), type(getChildAt), type(worldToLocal),
+        type(CollisionFlag ~= nil and CollisionFlag.getHasGroupFlagSet or nil))
+    local polygons, shapePolygons, perPath = {}, {}, {}
+    local placeablesSeen, withAreas, detailed, withShapes = 0, 0, 0, 0
     for _, placeable in ipairs(placeableSystem.placeables) do
         local px, _, pz = nodeXYZ(placeable.rootNode)
         if px ~= nil and (px - centerX) ^ 2 + (pz - centerZ) ^ 2 <= RADIUS * RADIUS then
@@ -134,6 +206,13 @@ function WailaPlaceableProbe.run(centerX, centerZ)
                 local group = area.path:gsub("%.%d+", ".#")
                 perPath[group] = (perPath[group] or 0) + 1
             end
+            local boxes, visitedNodes = WailaPlaceableProbe.collectShapeBoxes(placeable.rootNode)
+            if #boxes > 0 then
+                withShapes = withShapes + 1
+            end
+            for _, box in ipairs(boxes) do
+                shapePolygons[#shapePolygons + 1] = box.corners
+            end
             if detailed < 4 then
                 detailed = detailed + 1
                 local specs = {}
@@ -143,14 +222,14 @@ function WailaPlaceableProbe.run(centerX, centerZ)
                     end
                 end
                 table.sort(specs)
-                log("placeable '%s' at %.0f/%.0f: %d node area(s); specializations: %s", placeableName(placeable), px, pz, #areas, table.concat(specs, ", "))
+                log("placeable '%s' at %.0f/%.0f: %d node area(s), %d collision shape box(es) in %d node(s); specializations: %s", placeableName(placeable), px, pz, #areas, #boxes, visitedNodes, table.concat(specs, ", "))
                 for _, area in ipairs(areas) do
                     log("    %s (%s): %.0f/%.0f .. %.0f/%.0f", area.path, area.kind, area.corners[1][1], area.corners[1][2], area.corners[3][1], area.corners[3][2])
                 end
             end
         end
     end
-    log("%d placeable(s) within %dm, %d with node-defined areas, %d polygon(s) in total", placeablesSeen, RADIUS, withAreas, #polygons)
+    log("%d placeable(s) within %dm, %d with node-defined areas (%d polygon(s)), %d with collision shape boxes (%d box(es))", placeablesSeen, RADIUS, withAreas, #polygons, withShapes, #shapePolygons)
     local groups = {}
     for group, count in pairs(perPath) do
         groups[#groups + 1] = string.format("%s x%d", group, count)
@@ -165,12 +244,17 @@ function WailaPlaceableProbe.run(centerX, centerZ)
     WailaTrailTracer.buildLayerClassOverlay(centerX, centerZ)
     local map = WailaTrailTracer.layerClassOverlayMap
     local modifier = DensityMapModifier.new(map, 0, 3, g_terrainNode)
-    for _, corners in ipairs(polygons) do
-        modifier:clearPolygonPoints()
-        for _, corner in ipairs(corners) do
-            modifier:addPolygonPointWorldCoords(corner[1], corner[2])
+    -- a building is a union of rectangles: painting them all into one bitmap value
+    -- gives that union (white = placement areas, yellow = collision shape boxes,
+    -- drawn last so it shows where it differs)
+    for value, list in ipairs({ polygons, shapePolygons }) do
+        for _, corners in ipairs(list) do
+            modifier:clearPolygonPoints()
+            for _, corner in ipairs(corners) do
+                modifier:addPolygonPointWorldCoords(corner[1], corner[2])
+            end
+            modifier:executeSet(value + 3)
         end
-        modifier:executeSet(4)
     end
     local overlay = WailaTrailTracer.layerClassOverlay
     resetDensityMapVisualizationOverlay(overlay)
@@ -178,5 +262,6 @@ function WailaPlaceableProbe.run(centerX, centerZ)
     setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, WailaTrailTracer.LAYER_CLASS_FOREST, 0.0, 0.9, 0.4)
     setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 3, 1.0, 0.0, 1.0)
     setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 4, 1.0, 1.0, 1.0)
+    setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 5, 1.0, 0.9, 0.0)
     generateDensityMapVisualizationOverlay(overlay)
 end

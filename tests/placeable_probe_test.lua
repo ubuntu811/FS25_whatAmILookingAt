@@ -51,4 +51,29 @@ local paths = {}
 for _, f in ipairs(found) do paths[#paths + 1] = f.path end
 table.sort(paths)
 check("collectAreas: reports where each came from", paths[1]:find("spec_other") ~= nil and paths[2]:find("spec_placement") ~= nil)
+
+-- collision shape boxes: only shapes carrying STATIC_OBJECT / BUILDING flags count
+local tree = {
+    [100] = { name = "root", children = { 101, 102, 103 } },
+    [101] = { name = "wallA", shape = true, flags = { STATIC_OBJECT = true }, box = { 0, 0, 0, 20, 5, 8 } },
+    [102] = { name = "decoration", shape = true, flags = {}, box = { 0, 0, 0, 3, 3, 3 } },
+    [103] = { name = "wallB", shape = true, flags = { BUILDING = true }, box = { 0, 0, 0, 6, 4, 14 } },
+}
+nodes[100] = { x = 0, y = 0, z = 0, rot = 0 }
+nodes[101] = { x = 10, y = 0, z = 10, rot = 0 }
+nodes[102] = { x = 0, y = 0, z = 0, rot = 0 }
+nodes[103] = { x = 30, y = 0, z = 10, rot = 0 }
+ClassIds = { SHAPE = 1 }
+getHasClassId = function(id) return tree[id].shape == true end
+CollisionFlag.getHasGroupFlagSet = function(id, flag) return tree[id].flags[(flag == CollisionFlag.BUILDING) and "BUILDING" or "STATIC_OBJECT"] == true end
+getName = function(id) return tree[id].name end
+getNumOfChildren = function(id) return #(tree[id].children or {}) end
+getChildAt = function(id, index) return tree[id].children[index + 1] end
+getShapeBoundingBox = function(id) return unpack(tree[id].box) end
+local boxes = P.collectShapeBoxes(100)
+check("shape boxes: the two collision shapes, not the decoration", #boxes == 2)
+local areaSum = 0
+for _, b in ipairs(boxes) do areaSum = areaSum + polygonArea(b.corners) end
+check("shape boxes: footprint areas 20x8 + 6x14", math.abs(areaSum - (160 + 84)) < 1e-6)
+check("shape boxes land at their node's world position", math.abs(boxes[1].corners[1][1] - 10) < 1e-6)
 finish("placeable_probe_test")
