@@ -72,4 +72,24 @@ local areaSum = 0
 for _, b in ipairs(boxes) do areaSum = areaSum + polygonArea(b.corners) end
 check("collision bodies: world areas 20x8 + 6x14", math.abs(areaSum - (160 + 84)) < 1e-6)
 check("collision bodies: corners are already in world space", math.abs(boxes[1].corners[1][1] - 10) < 1e-6 and math.abs(boxes[1].corners[1][2] - 10) < 1e-6)
+
+-- raycast footprint: a building (x 10..30, z 10..20, roof 8m high) and a low wall (x 40..44, z 10..20, 0.8m)
+g_terrainNode = 1
+getTerrainHeightAtWorldPos = function() return 100 end
+local hitTarget
+raycastClosest = function(x, y, z, dx, dy, dz, distance, callbackName, target)
+    if x >= 10 and x <= 30 and z >= 10 and z <= 20 then target[callbackName](target, 500, x, 108, z)
+    elseif x >= 40 and x <= 44 and z >= 10 and z <= 20 then target[callbackName](target, 501, x, 100.8, z) end
+end
+CollisionFlag.getHasGroupFlagSet = function(node, flag) return node == 500 and flag == CollisionFlag.BUILDING end
+local cells, rays = P.raycastFootprint(25, 15, 30, 2.0, {})
+local roof, low = 0, 0
+for _, c in ipairs(cells) do if c.kind == 6 then roof = roof + 1 end if c.x >= 40 then low = low + 1 end end
+check("raycast: the roof is found as BUILDING cells (20 x 10 m on a 2 m grid, edges inclusive: 11 x 6 = 66)", roof == 66)
+check("raycast: a 0.8 m wall is below the roof threshold and ignored", low == 0)
+check("raycast: one ray per cell, none repeated", rays == 30 * 30)
+local again = {}
+local _, r1 = P.raycastFootprint(25, 15, 30, 2.0, again)
+local _, r2 = P.raycastFootprint(25, 15, 30, 2.0, again)
+check("raycast: the shared seen set stops overlapping windows being cast twice", r2 == 0)
 finish("placeable_probe_test")

@@ -17,6 +17,11 @@
     union. Second source: the placeable's own collision shapes (static object /
     building flags) walked from its root node, each drawn as its bounding box
     (yellow), which follows the walls more closely than placement test areas.
+
+    Third source: a downward raycast grid around the nearest placeables. A ray
+    from above lands on the roof, and the hit node's collision group says
+    building (red) or other static object (cyan): a roof outline, like the
+    building footprints on a street map.
 ]]
 
 WailaPlaceableProbe = {}
@@ -161,6 +166,47 @@ function WailaPlaceableProbe.collectShapeBoxes(rootNode)
     return boxes, visited
 end
 
+-- Roof outline by raycast: a ray straight down from above hits the roof (or wall
+-- top) of a building before it reaches the ground; the hit node's collision group
+-- says what it is. Cells whose ray lands more than 1.5m above the terrain on a
+-- BUILDING / STATIC_OBJECT body are "built". One raycast per cell, so it is only run
+-- in a window around each nearby placeable, never over the map.
+local RAY_START_ABOVE = 60
+local ROOF_MIN_HEIGHT = 1.5
+local rayTarget = {}
+function rayTarget:onFootprintRayCallback(hitObjectId, x, y)
+    if hitObjectId ~= nil and hitObjectId ~= 0 then
+        self.hitNode, self.hitY = hitObjectId, y
+    end
+    return false
+end
+
+-- Returns { { x, z, kind }, ... } with kind 6 = BUILDING body, 7 = other static object.
+function WailaPlaceableProbe.raycastFootprint(centerX, centerZ, halfSize, cell, seen)
+    local cells, rays = {}, 0
+    local mask = bit32.bor(CollisionFlag.BUILDING, CollisionFlag.STATIC_OBJECT)
+    local steps = math.floor(halfSize * 2 / cell)
+    for row = 0, steps - 1 do
+        local z = centerZ - halfSize + (row + 0.5) * cell
+        for col = 0, steps - 1 do
+            local x = centerX - halfSize + (col + 0.5) * cell
+            local key = math.floor(x / cell) * 100003 + math.floor(z / cell)
+            if not seen[key] then
+                seen[key] = true
+                local terrainY = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z)
+                rayTarget.hitNode, rayTarget.hitY = nil, nil
+                raycastClosest(x, terrainY + RAY_START_ABOVE, z, 0, -1, 0, RAY_START_ABOVE + 5, "onFootprintRayCallback", rayTarget, mask)
+                rays = rays + 1
+                if rayTarget.hitNode ~= nil and rayTarget.hitY > terrainY + ROOF_MIN_HEIGHT then
+                    local ok, isBuilding = pcall(CollisionFlag.getHasGroupFlagSet, rayTarget.hitNode, CollisionFlag.BUILDING)
+                    cells[#cells + 1] = { x = x, z = z, kind = (ok and isBuilding) and 6 or 7, height = rayTarget.hitY - terrainY }
+                end
+            end
+        end
+    end
+    return cells, rays
+end
+
 local function placeableName(placeable)
     local ok, name = pcall(function() return placeable:getName() end)
     if ok and name ~= nil then
@@ -237,6 +283,27 @@ function WailaPlaceableProbe.run(centerX, centerZ)
         log("  area source: %s", line)
     end
 
+    -- roof outline by raycast around the nearest placeables
+    local rayCells, rayCount, seen = {}, 0, {}
+    local rayStart = getTimeSec()
+    for index = 1, math.min(4, #candidates) do
+        local candidate = candidates[index]
+        if candidate.distance <= 150 * 150 then
+            local cells, rays = WailaPlaceableProbe.raycastFootprint(candidate.px, candidate.pz, 45, 2.0, seen)
+            rayCount = rayCount + rays
+            for _, c in ipairs(cells) do
+                rayCells[#rayCells + 1] = c
+            end
+        end
+    end
+    local buildingCells, staticCells, maxHeight = 0, 0, 0
+    for _, c in ipairs(rayCells) do
+        if c.kind == 6 then buildingCells = buildingCells + 1 else staticCells = staticCells + 1 end
+        maxHeight = math.max(maxHeight, c.height)
+    end
+    log("raycast footprint: %d ray(s) around the %d nearest placeable(s) in %.0fms -> %d BUILDING cell(s), %d other static cell(s), highest hit %.1fm above ground",
+        rayCount, math.min(4, #candidates), (getTimeSec() - rayStart) * 1000, buildingCells, staticCells, maxHeight)
+
     -- draw: the class overlay first (creates the overlay, shows the ground layers),
     -- then the rectangles on top in white
     WailaTrailTracer.buildLayerClassOverlay(centerX, centerZ)
@@ -254,6 +321,14 @@ function WailaPlaceableProbe.run(centerX, centerZ)
             modifier:executeSet(value + 3)
         end
     end
+    for _, c in ipairs(rayCells) do
+        modifier:clearPolygonPoints()
+        modifier:addPolygonPointWorldCoords(c.x - 1, c.z - 1)
+        modifier:addPolygonPointWorldCoords(c.x + 1, c.z - 1)
+        modifier:addPolygonPointWorldCoords(c.x + 1, c.z + 1)
+        modifier:addPolygonPointWorldCoords(c.x - 1, c.z + 1)
+        modifier:executeSet(c.kind)
+    end
     local overlay = WailaTrailTracer.layerClassOverlay
     resetDensityMapVisualizationOverlay(overlay)
     setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, WailaTrailTracer.LAYER_CLASS_ROAD, 1.0, 0.35, 0.0)
@@ -261,5 +336,7 @@ function WailaPlaceableProbe.run(centerX, centerZ)
     setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 3, 1.0, 0.0, 1.0)
     setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 4, 1.0, 1.0, 1.0)
     setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 5, 1.0, 0.9, 0.0)
+    setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 6, 1.0, 0.0, 0.0)
+    setDensityMapVisualizationOverlayStateColor(overlay, map, 0, 0, 0, 3, 7, 0.0, 0.8, 1.0)
     generateDensityMapVisualizationOverlay(overlay)
 end
