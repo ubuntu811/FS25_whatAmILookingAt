@@ -60,21 +60,6 @@ local TEST_RIG_SPACING = 2.0
 WailaDebugTools.TEST_RIG_AREA_TYPE = "waila_foliage_testrig"
 local AREA_FILL_STEP = 0.5
 
-local PAINT_LAYER_TEST_ROW = {
-    "grass01", "grass02", "grassDry01", "grassDry02", "grassPavement01",
-    "GRASS", "GRASSDRY", "GRASSPAVEMENT",
-}
-
--- Guesses at whether some named "terrain detail" density system exists
--- that's more granular than getTerrainAttributesAtWorldPos's coarse
--- materialId bucket - none confirmed to resolve to anything. Does NOT
--- reveal which of the map's real paint layers (dirt01/grass01/etc) is
--- under a point even in the best case - that's a separate subsystem
--- (TerrainDeformation paint layers) with no per-position read at all.
-local DENSITY_PROBE_CANDIDATE_NAMES = {
-    "groundType", "GROUND_TYPE", "material", "terrainType", "ground",
-}
-
 function WailaDebugTools.new()
     local self = setmetatable({}, WailaDebugTools_mt)
 
@@ -173,20 +158,6 @@ function WailaDebugTools:dumpTerrainLayers()
     for i = 0, numLayers - 1 do
         local layerName = getTerrainLayerName(g_terrainNode, i)
         log("[TerrainLayers] [%d] %s", i, tostring(layerName))
-    end
-end
-
-function WailaDebugTools:placeTerrainLayerTestRow(hx, hz)
-    for i, layerName in ipairs(PAINT_LAYER_TEST_ROW) do
-        local px = hx + (i - 1) * TEST_RIG_SPACING
-        local layerId = self:getTerrainLayerIdByName(layerName)
-
-        if layerId == nil then
-            log("[LayerTest] [%d] %s -> no such layer on this map", i, layerName)
-        else
-            self:paintTerrainAtLayer(px, hz, layerId)
-            log("[LayerTest] [%d] %s (id=%d) painted at (%.2f %.2f)", i, layerName, layerId, px, hz)
-        end
     end
 end
 

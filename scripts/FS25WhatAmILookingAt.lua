@@ -152,17 +152,10 @@ function FS25WhatAmILookingAt:setupComponents()
 
     registerActionTab("terrain", "Terrain", {
         { label = "Dump terrain layers", run = function() mod:onDumpTerrainLayers() end },
-        { label = "Paint layer test row", run = function() mod:onPlaceTerrainLayerTestRow() end },
-        { label = "Build road overlay (from real splines)", run = function() mod:onBuildRoadOverlay() end },
         { label = "Build tree/water overlay near player", run = function() mod:onBuildFeatureOverlay() end },
         { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
-        { label = "Learn layer classes (road from splines, forest from classifier)", run = function() WailaTrailTracer.learnLayerClasses() end },
         { label = "Build layer-class overlay near player (road orange, forest green)", run = function() mod:onBuildLayerClassOverlay() end },
-        { label = "NEW layer scan (whole map) -- compare with Shift+G", run = function() WailaTrailTracer.startLayerScan() end },
-        { label = "Link trail fragments now (post-pass on the stored trails)", run = function() WailaTrailTracer.linkTrailFragments() end },
-        { label = "Rescan ROAD LAYER only (whole map, about a minute)", run = function() WailaTrailTracer.startRoadLayerOnlyScan() end },
         { label = "TOGGLE overlay debug colours (loud, distinct per layer)", run = function() WailaTrailTracer.toggleDebugColors() end },
-        { label = "Build layer+material PAIR overlay near player (top 7 colour-coded, legend in log)", run = function() mod:onBuildLayerPairOverlay() end },
     })
 
     registerActionTab("foliage", "Foliage", {
@@ -471,24 +464,6 @@ function FS25WhatAmILookingAt:onDumpTerrainLayers()
     self.debugTools:dumpTerrainLayers()
 end
 
-function FS25WhatAmILookingAt:onPlaceTerrainLayerTestRow()
-    if self.current == nil or self.current.hit == nil then
-        log("[LayerTest] No current terrain target")
-        return
-    end
-
-    self.debugTools:placeTerrainLayerTestRow(self.current.hit.x, self.current.hit.z)
-end
-
-function FS25WhatAmILookingAt:onBuildRoadOverlay()
-    local success, splineCountOrReason, polygonCount = WailaTrailTracer.buildRoadSplineOverlay()
-    if success then
-        log("[RoadOverlay] built from %d spline(s), %d ribbon polygon(s)", splineCountOrReason, polygonCount)
-    else
-        log("[RoadOverlay] failed: %s", tostring(splineCountOrReason))
-    end
-end
-
 function FS25WhatAmILookingAt:onBuildLayerClassOverlay()
     local x, z
     if self.current ~= nil and self.current.hit ~= nil then
@@ -502,21 +477,6 @@ function FS25WhatAmILookingAt:onBuildLayerClassOverlay()
         return
     end
     WailaTrailTracer.buildLayerClassOverlay(x, z)
-end
-
-function FS25WhatAmILookingAt:onBuildLayerPairOverlay()
-    local x, z
-    if self.current ~= nil and self.current.hit ~= nil then
-        x, z = self.current.hit.x, self.current.hit.z
-    elseif g_localPlayer ~= nil and g_localPlayer.getPosition ~= nil then
-        local px, _, pz = g_localPlayer:getPosition()
-        x, z = px, pz
-    end
-    if x == nil then
-        log("[LayerPairOverlay] no target or player position")
-        return
-    end
-    WailaTrailTracer.buildLayerPairOverlay(x, z)
 end
 
 function FS25WhatAmILookingAt:onBuildFeatureOverlay()

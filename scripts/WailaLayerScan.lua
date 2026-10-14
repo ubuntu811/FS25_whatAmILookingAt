@@ -235,21 +235,22 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
     return result
 end
 
--- Starts a whole-map layer scan. Uses the same wholeMapScanState (so TaskMap's
--- progress bar and the mutual-exclusion guards keep working); layerMode makes
--- tickWholeMapScanStep hand each tick to tickLayerScanStep below.
-function WailaTrailTracer.startLayerScan()
+-- Starts the whole-map scan (TaskMap's Shift+G). wholeMapScanState drives
+-- TaskMap's progress bar and the save/load mutual-exclusion guards;
+-- tickWholeMapScan runs tickLayerScanStep inside the per-frame budget.
+function WailaTrailTracer.startWholeMapScan()
     if WailaTrailTracer.loadState ~= nil or WailaTrailTracer.saveState ~= nil or WailaTrailTracer.wholeMapScanState ~= nil then
-        log("startLayerScan: refused -- a scan, save or load is already in progress")
+        log("startWholeMapScan: refused -- a scan, save or load is already in progress")
         return
     end
 
     WailaTrailTracer.clearScanOverlays()
     WailaTrailTracer.savedRegionsByMaterial = { [1] = {}, [6] = {}, [7] = {} }
     WailaTrailTracer.savedForestRegions = {}
+    WailaTrailTracer.savedRoadRegions = {}
     WailaTrailTracer.learnLayerClasses()
     if not WailaTrailTracer.layerClassLearned then
-        log("startLayerScan: no layer classes could be learned on this map, nothing to scan with")
+        log("startWholeMapScan: no layer classes could be learned on this map, nothing to scan with")
         return
     end
 
@@ -263,11 +264,10 @@ function WailaTrailTracer.startLayerScan()
         chunksPerSide = chunksPerSide,
         col = 0,
         row = 0,
-        layerMode = true,
         stats = { forestPolygons = 0, forestPoints = 0, trailPolygons = 0, trailPoints = 0, roadPolygons = 0, emptyChunks = 0, totalMs = 0, maxMs = 0 },
         startTime = getTimeSec(),
     }
-    log("startLayerScan: %d chunk(s) (%.0fm each) queued", chunksPerSide * chunksPerSide, chunkSize)
+    log("startWholeMapScan: %d chunk(s) (%.0fm each) queued", chunksPerSide * chunksPerSide, chunkSize)
 end
 
 local function countPoints(polygons)
@@ -291,9 +291,11 @@ function WailaTrailTracer.tickLayerScanStep(state)
     if result == nil then
         stats.emptyChunks = stats.emptyChunks + 1
         WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, {})
+        WailaTrailTracer.recordRoadPolygons(minX, minZ, maxX, maxZ, {})
         WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, {})
     else
         WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, result.forest)
+        WailaTrailTracer.recordRoadPolygons(minX, minZ, maxX, maxZ, result.road)
         WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, { [6] = result.trail })
         if #result.forest > 0 then
             WailaTrailTracer.buildForestOverlayIncremental(result.forest)
