@@ -74,8 +74,8 @@ local MATERIAL_COLOR_DEBUG = {
 }
 WailaTrailTracer.debugColors = false
 WailaTrailTracer.PALETTE = {
-    normal = { forest = { 0.02, 0.2, 0.04 }, road = { 0.12, 0.12, 0.12 } },
-    debug = { forest = { 0.2, 1.0, 0.2 }, road = { 1.0, 0.4, 0.0 } },
+    normal = { forest = { 0.02, 0.2, 0.04 }, road = { 0.12, 0.12, 0.12 }, building = { 0.55, 0.5, 0.45 } },
+    debug = { forest = { 0.2, 1.0, 0.2 }, road = { 1.0, 0.4, 0.0 }, building = { 1.0, 0.0, 0.0 } },
 }
 local function paletteColor(name)
     return WailaTrailTracer.PALETTE[WailaTrailTracer.debugColors and "debug" or "normal"][name]
@@ -131,18 +131,16 @@ WailaTrailTracer.SAVEGAME_FILENAME = "wailaTrail.xml"
 -- removes a stale entry. Polygons here are already simplified outlines
 -- (see traceForestPolygonsFromGrid), so unlike material polygons they are
 -- NOT re-smoothed on load.
-WailaTrailTracer.savedForestRegions = {}
--- Same shape for the road layer (without it a restored map has no roads on top).
-WailaTrailTracer.savedRoadRegions = {}
+-- Forest, road and building polygons all share one shape: { [regionKey] = polygons },
+-- replaced when the region is rescanned, an empty rescan removes the entry. Forest
+-- outlines are already simplified (traceForestPolygonsFromGrid), so none of these
+-- are re-smoothed on load.
+WailaTrailTracer.REGION_LAYERS = { "forest", "road", "building" }
+WailaTrailTracer.savedRegions = { forest = {}, road = {}, building = {} }
 
-function WailaTrailTracer.recordRoadPolygons(minX, minZ, maxX, maxZ, polygons)
+function WailaTrailTracer.recordRegionPolygons(layer, minX, minZ, maxX, maxZ, polygons)
     local regionKey = string.format("%.1f_%.1f_%.1f_%.1f", minX, minZ, maxX, maxZ)
-    WailaTrailTracer.savedRoadRegions[regionKey] = #polygons > 0 and polygons or nil
-end
-
-function WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, polygons)
-    local regionKey = string.format("%.1f_%.1f_%.1f_%.1f", minX, minZ, maxX, maxZ)
-    WailaTrailTracer.savedForestRegions[regionKey] = #polygons > 0 and polygons or nil
+    WailaTrailTracer.savedRegions[layer][regionKey] = #polygons > 0 and polygons or nil
 end
 
 function WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, polygonsByMaterial)
@@ -2125,16 +2123,24 @@ function WailaTrailTracer.scanRoadLayerChunk(minX, minZ, chunkSize)
     return polygons, roadCells
 end
 
-WailaTrailTracer.lastRoadLayerOverlayRegenerateTime = nil
-function WailaTrailTracer.buildRoadLayerOverlayIncremental(polygons, forceRegenerate)
+-- Road and building layers: one overlay each (a single-value bit-vector map), written
+-- polygon by polygon, regenerated at most every few seconds while a scan runs.
+local simpleLayers = {
+    road = { mapField = "roadLayerOverlayMap", overlayField = "roadLayerOverlay", name = "wailaRoadLayerOverlay", lastRegenerate = nil },
+    building = { mapField = "buildingLayerOverlayMap", overlayField = "buildingLayerOverlay", name = "wailaBuildingLayerOverlay", lastRegenerate = nil },
+}
+WailaTrailTracer.BUILDING_LAYER_CURVE_TOLERANCE = 0.8
+
+local function buildSimpleLayerOverlay(layer, polygons, forceRegenerate)
+    local def = simpleLayers[layer]
     local size = WailaTrailTracer.OVERLAY_RESOLUTION
-    if WailaTrailTracer.roadLayerOverlayMap == nil then
-        WailaTrailTracer.roadLayerOverlayMap = createBitVectorMap("wailaRoadLayerOverlayMap")
-        loadBitVectorMapNew(WailaTrailTracer.roadLayerOverlayMap, size, size, 1, false)
-        WailaTrailTracer.roadLayerOverlay = createDensityMapVisualizationOverlay("wailaRoadLayerOverlay", size, size)
+    if WailaTrailTracer[def.mapField] == nil then
+        WailaTrailTracer[def.mapField] = createBitVectorMap(def.name .. "Map")
+        loadBitVectorMapNew(WailaTrailTracer[def.mapField], size, size, 1, false)
+        WailaTrailTracer[def.overlayField] = createDensityMapVisualizationOverlay(def.name, size, size)
     end
 
-    local modifier = DensityMapModifier.new(WailaTrailTracer.roadLayerOverlayMap, 0, 1, g_terrainNode)
+    local modifier = DensityMapModifier.new(WailaTrailTracer[def.mapField], 0, 1, g_terrainNode)
     for _, polygon in ipairs(polygons) do
         modifier:clearPolygonPoints()
         for _, point in ipairs(polygon) do
@@ -2144,16 +2150,42 @@ function WailaTrailTracer.buildRoadLayerOverlayIncremental(polygons, forceRegene
     end
 
     local now = getTimeSec()
-    if not forceRegenerate and WailaTrailTracer.lastRoadLayerOverlayRegenerateTime ~= nil
-        and now - WailaTrailTracer.lastRoadLayerOverlayRegenerateTime < WailaTrailTracer.ROAD_LAYER_OVERLAY_REGENERATE_INTERVAL_SEC then
+    if not forceRegenerate and def.lastRegenerate ~= nil
+        and now - def.lastRegenerate < WailaTrailTracer.ROAD_LAYER_OVERLAY_REGENERATE_INTERVAL_SEC then
         return
     end
-    WailaTrailTracer.lastRoadLayerOverlayRegenerateTime = now
+    def.lastRegenerate = now
 
-    local color = paletteColor("road")
-    resetDensityMapVisualizationOverlay(WailaTrailTracer.roadLayerOverlay)
-    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer.roadLayerOverlay, WailaTrailTracer.roadLayerOverlayMap, 0, 0, 0, 1, 1, color[1], color[2], color[3])
-    generateDensityMapVisualizationOverlay(WailaTrailTracer.roadLayerOverlay)
+    local color = paletteColor(layer)
+    resetDensityMapVisualizationOverlay(WailaTrailTracer[def.overlayField])
+    setDensityMapVisualizationOverlayStateColor(WailaTrailTracer[def.overlayField], WailaTrailTracer[def.mapField], 0, 0, 0, 1, 1, color[1], color[2], color[3])
+    generateDensityMapVisualizationOverlay(WailaTrailTracer[def.overlayField])
+end
+
+function WailaTrailTracer.buildRoadLayerOverlayIncremental(polygons, forceRegenerate)
+    buildSimpleLayerOverlay("road", polygons, forceRegenerate)
+end
+
+function WailaTrailTracer.buildBuildingLayerOverlayIncremental(polygons, forceRegenerate)
+    buildSimpleLayerOverlay("building", polygons, forceRegenerate)
+end
+
+-- Draws polygons of one region layer (forest / road / building) on its overlay.
+function WailaTrailTracer.drawRegionPolygons(layer, polygons, forceRegenerate)
+    if layer == "forest" then
+        WailaTrailTracer.buildForestOverlayIncremental(polygons, forceRegenerate)
+    elseif layer == "road" then
+        WailaTrailTracer.buildRoadLayerOverlayIncremental(polygons, forceRegenerate)
+    elseif layer == "building" then
+        WailaTrailTracer.buildBuildingLayerOverlayIncremental(polygons, forceRegenerate)
+    end
+end
+
+function WailaTrailTracer.regionOverlayExists(layer)
+    if layer == "forest" then
+        return WailaTrailTracer.forestOverlayMap ~= nil
+    end
+    return WailaTrailTracer[simpleLayers[layer].mapField] ~= nil
 end
 
 -- Debug colour mode: re-colour every existing overlay (one regenerate each).
@@ -2162,11 +2194,10 @@ function WailaTrailTracer.setDebugColors(enabled)
     if WailaTrailTracer.testOverlayMap ~= nil then
         WailaTrailTracer.buildTestOverlay({}, true)
     end
-    if WailaTrailTracer.forestOverlayMap ~= nil then
-        WailaTrailTracer.buildForestOverlayIncremental({}, true)
-    end
-    if WailaTrailTracer.roadLayerOverlayMap ~= nil then
-        WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+    for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
+        if WailaTrailTracer.regionOverlayExists(layer) then
+            WailaTrailTracer.drawRegionPolygons(layer, {}, true)
+        end
     end
     log("overlay colours: %s mode", WailaTrailTracer.debugColors and "DEBUG (loud)" or "normal")
 end
@@ -2284,14 +2315,14 @@ function WailaTrailTracer.clearScanOverlays()
     clearMap(WailaTrailTracer.testOverlayMap, WailaTrailTracer.OVERLAY_NUM_CHANNELS)
     clearMap(WailaTrailTracer.forestOverlayMap, 2)
     clearMap(WailaTrailTracer.roadLayerOverlayMap, 1)
+    clearMap(WailaTrailTracer.buildingLayerOverlayMap, 1)
     if WailaTrailTracer.testOverlayMap ~= nil then
         WailaTrailTracer.buildTestOverlay({}, true)
     end
-    if WailaTrailTracer.forestOverlayMap ~= nil then
-        WailaTrailTracer.buildForestOverlayIncremental({}, true)
-    end
-    if WailaTrailTracer.roadLayerOverlayMap ~= nil then
-        WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+    for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
+        if WailaTrailTracer.regionOverlayExists(layer) then
+            WailaTrailTracer.drawRegionPolygons(layer, {}, true)
+        end
     end
 end
 
@@ -2385,30 +2416,21 @@ function WailaTrailTracer.startSaveToXML()
         end
     end
 
-    local forestRegionIndex = 0
-    for regionKey, polygons in pairs(WailaTrailTracer.savedForestRegions) do
-        local regionElementKey = string.format("wailaTrail.forest.region(%d)", forestRegionIndex)
-        forestRegionIndex = forestRegionIndex + 1
-        xmlFile:setString(regionElementKey .. "#key", regionKey)
-        for polyIndex, polygon in ipairs(polygons) do
-            table.insert(workItems, {
-                key = string.format("%s.polygon(%d)#points", regionElementKey, polyIndex - 1),
-                polygon = polygon,
-            })
+    local regionCounts = {}
+    for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
+        local regionIndex = 0
+        for regionKey, polygons in pairs(WailaTrailTracer.savedRegions[layer]) do
+            local regionElementKey = string.format("wailaTrail.%s.region(%d)", layer, regionIndex)
+            regionIndex = regionIndex + 1
+            xmlFile:setString(regionElementKey .. "#key", regionKey)
+            for polyIndex, polygon in ipairs(polygons) do
+                table.insert(workItems, {
+                    key = string.format("%s.polygon(%d)#points", regionElementKey, polyIndex - 1),
+                    polygon = polygon,
+                })
+            end
         end
-    end
-
-    local roadRegionIndex = 0
-    for regionKey, polygons in pairs(WailaTrailTracer.savedRoadRegions) do
-        local regionElementKey = string.format("wailaTrail.road.region(%d)", roadRegionIndex)
-        roadRegionIndex = roadRegionIndex + 1
-        xmlFile:setString(regionElementKey .. "#key", regionKey)
-        for polyIndex, polygon in ipairs(polygons) do
-            table.insert(workItems, {
-                key = string.format("%s.polygon(%d)#points", regionElementKey, polyIndex - 1),
-                polygon = polygon,
-            })
-        end
+        regionCounts[#regionCounts + 1] = string.format("%d %s", regionIndex, layer)
     end
 
     WailaTrailTracer.saveState = {
@@ -2418,7 +2440,7 @@ function WailaTrailTracer.startSaveToXML()
         index = 1,
         startTime = getTimeSec(),
     }
-    log("startSaveToXML: %d polygon(s) queued (%d forest region(s)), writing incrementally", #workItems, forestRegionIndex)
+    log("startSaveToXML: %d polygon(s) queued (regions: %s), writing incrementally", #workItems, table.concat(regionCounts, ", "))
     return true
 end
 
@@ -2520,26 +2542,17 @@ function WailaTrailTracer.startLoadFromXML()
         end
     end
 
-    local loadedForest = {}
-    for _, regionElementKey in xmlFile:iterator("wailaTrail.forest.region") do
-        local regionKey = xmlFile:getString(regionElementKey .. "#key")
-        if regionKey ~= nil then
-            local polygons = {}
-            loadedForest[regionKey] = polygons
-            for _, polygonElementKey in xmlFile:iterator(regionElementKey .. ".polygon") do
-                table.insert(workItems, { isForest = true, polygons = polygons, polygonElementKey = polygonElementKey })
-            end
-        end
-    end
-
-    local loadedRoad = {}
-    for _, regionElementKey in xmlFile:iterator("wailaTrail.road.region") do
-        local regionKey = xmlFile:getString(regionElementKey .. "#key")
-        if regionKey ~= nil then
-            local polygons = {}
-            loadedRoad[regionKey] = polygons
-            for _, polygonElementKey in xmlFile:iterator(regionElementKey .. ".polygon") do
-                table.insert(workItems, { isRoad = true, polygons = polygons, polygonElementKey = polygonElementKey })
+    local loadedLayers, pendingLayers = {}, {}
+    for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
+        loadedLayers[layer], pendingLayers[layer] = {}, {}
+        for _, regionElementKey in xmlFile:iterator("wailaTrail." .. layer .. ".region") do
+            local regionKey = xmlFile:getString(regionElementKey .. "#key")
+            if regionKey ~= nil then
+                local polygons = {}
+                loadedLayers[layer][regionKey] = polygons
+                for _, polygonElementKey in xmlFile:iterator(regionElementKey .. ".polygon") do
+                    table.insert(workItems, { layer = layer, polygons = polygons, polygonElementKey = polygonElementKey })
+                end
             end
         end
     end
@@ -2549,33 +2562,33 @@ function WailaTrailTracer.startLoadFromXML()
         workItems = workItems,
         index = 1,
         loadedRegions = loadedRegions,
-        loadedForest = loadedForest,
-        loadedRoad = loadedRoad,
-        pendingRoad = {},
-        pendingForest = {},
+        loadedLayers = loadedLayers,
+        pendingLayers = pendingLayers,
         pendingByMaterial = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} },
         startTime = getTimeSec(),
         lastProgressLogTime = getTimeSec(),
         polygonCount = 0,
     }
-    local forestRegionCount = 0
-    for _ in pairs(loadedForest) do
-        forestRegionCount = forestRegionCount + 1
+    local regionCounts = {}
+    for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
+        local count = 0
+        for _ in pairs(loadedLayers[layer]) do
+            count = count + 1
+        end
+        regionCounts[#regionCounts + 1] = string.format("%d %s", count, layer)
     end
-    log("startLoadFromXML: %d polygon(s) queued (%d forest region(s)), restoring incrementally", #workItems, forestRegionCount)
+    log("startLoadFromXML: %d polygon(s) queued (regions: %s), restoring incrementally", #workItems, table.concat(regionCounts, ", "))
 end
 
 -- Flushes whatever raw polygons tickLoadFromXML has parsed so far into
 -- the live overlay -- called at least once per tick (bounded batch size,
 -- never the whole dataset at once) and once more at the very end.
 local function flushPendingLoadBatch(state)
-    if #state.pendingForest > 0 then
-        WailaTrailTracer.buildForestOverlayIncremental(state.pendingForest)
-        state.pendingForest = {}
-    end
-    if #state.pendingRoad > 0 then
-        WailaTrailTracer.buildRoadLayerOverlayIncremental(state.pendingRoad)
-        state.pendingRoad = {}
+    for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
+        if #state.pendingLayers[layer] > 0 then
+            WailaTrailTracer.drawRegionPolygons(layer, state.pendingLayers[layer])
+            state.pendingLayers[layer] = {}
+        end
     end
 
     local hasAny = false
@@ -2636,10 +2649,8 @@ function WailaTrailTracer.tickLoadFromXML()
                 end
             end
             table.insert(item.polygons, rawPolygon)
-            if item.isForest then
-                table.insert(state.pendingForest, rawPolygon)
-            elseif item.isRoad then
-                table.insert(state.pendingRoad, rawPolygon)
+            if item.layer ~= nil then
+                table.insert(state.pendingLayers[item.layer], rawPolygon)
             else
                 table.insert(state.pendingByMaterial[item.materialId], rawPolygon)
             end
@@ -2674,13 +2685,13 @@ function WailaTrailTracer.tickLoadFromXML()
     -- completion -- the last flush could land inside the throttle
     -- window and never actually show without this.
     WailaTrailTracer.buildTestOverlay({}, true)
-    WailaTrailTracer.buildForestOverlayIncremental({}, true)
-    WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+    for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
+        WailaTrailTracer.drawRegionPolygons(layer, {}, true)
+    end
     state.xmlFile:delete()
 
     WailaTrailTracer.savedRegionsByMaterial = state.loadedRegions
-    WailaTrailTracer.savedForestRegions = state.loadedForest
-    WailaTrailTracer.savedRoadRegions = state.loadedRoad
+    WailaTrailTracer.savedRegions = state.loadedLayers
 
     local elapsedMs = (getTimeSec() - state.startTime) * 1000
     log("tickLoadFromXML done: %d polygon(s) restored in %.0fms (%.1fs)", state.polygonCount, elapsedMs, elapsedMs / 1000)

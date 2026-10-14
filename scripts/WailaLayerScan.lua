@@ -13,6 +13,10 @@
                 clear of the forest area (IW wear, yards, parking lots). Worn
                 material is continuous where the layer signal fragments
       road    = the road layer, found by a 1m pass in chunks that have any
+      building = the roof outline: a ray straight down from above lands on the
+                roof, and a hit on a BUILDING collision body more than 1.5m above
+                the terrain is a building cell (about 1.4us per ray, so a 2m grid
+                over the whole map is a few seconds)
 
     Replaces the window forest classifier, the 1m border refinement and the 1m
     material scan for a whole-map pass; shares the overlays, the polygon store
@@ -263,6 +267,56 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
     return result
 end
 
+-- ===== Buildings by raycast =====
+-- Real finding (placeable probe on the cement factory): the walls' rigid-body boxes
+-- are far bigger than the building, but a downward ray lands on the roof and the
+-- BUILDING hits trace the true, stepped outline. Measured: 3,581 rays in 5ms.
+WailaTrailTracer.BUILDING_CELL_SIZE = 2.0
+WailaTrailTracer.BUILDING_RAY_START_ABOVE = 60
+WailaTrailTracer.BUILDING_MIN_HEIGHT = 1.5
+WailaTrailTracer.BUILDING_MIN_CELLS = 4
+WailaTrailTracer.BUILDING_MIN_HOLE_CELLS = 16
+
+local buildingRayTarget = {}
+function buildingRayTarget:onBuildingRayCallback(hitObjectId, x, y)
+    if hitObjectId ~= nil and hitObjectId ~= 0 then
+        self.hitNode, self.hitY = hitObjectId, y
+    end
+    return false
+end
+
+-- Building polygons for one chunk (curve-fitted loops; corners are kept by the fit).
+function WailaTrailTracer.scanBuildingChunk(minX, minZ, chunkSize)
+    local cell = WailaTrailTracer.BUILDING_CELL_SIZE
+    local n = math.floor(chunkSize / cell)
+    local above = WailaTrailTracer.BUILDING_RAY_START_ABOVE
+    local minHeight = WailaTrailTracer.BUILDING_MIN_HEIGHT
+    local mask, count = {}, 0
+    for row = 0, n - 1 do
+        local line = {}
+        local z = minZ + (row + 0.5) * cell
+        for col = 0, n - 1 do
+            local x = minX + (col + 0.5) * cell
+            local terrainY = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z)
+            buildingRayTarget.hitNode, buildingRayTarget.hitY = nil, nil
+            raycastClosest(x, terrainY + above, z, 0, -1, 0, above + 5, "onBuildingRayCallback", buildingRayTarget, CollisionFlag.BUILDING)
+            local hit = buildingRayTarget.hitNode ~= nil and buildingRayTarget.hitY > terrainY + minHeight
+            line[col] = hit
+            if hit then
+                count = count + 1
+            end
+        end
+        mask[row] = line
+    end
+    if count == 0 then
+        return {}
+    end
+    -- roof gaps (a ray between two roof parts) close; tiny specks go
+    mask = erodeMask(dilateMask(mask, n, 1), n, 1)
+    WailaTrailTracer.cleanComponents(mask, noProtectedRows, n, WailaTrailTracer.BUILDING_MIN_CELLS, WailaTrailTracer.BUILDING_MIN_HOLE_CELLS)
+    return WailaTrailTracer.traceMaskPolygons(mask, minX, minZ, n, cell, WailaTrailTracer.BUILDING_LAYER_CURVE_TOLERANCE)
+end
+
 -- Starts the whole-map scan (TaskMap's Shift+G). wholeMapScanState drives
 -- TaskMap's progress bar and the save/load mutual-exclusion guards;
 -- tickWholeMapScan runs tickLayerScanStep inside the per-frame budget.
@@ -274,8 +328,7 @@ function WailaTrailTracer.startWholeMapScan()
 
     WailaTrailTracer.clearScanOverlays()
     WailaTrailTracer.savedRegionsByMaterial = { [1] = {}, [6] = {}, [7] = {} }
-    WailaTrailTracer.savedForestRegions = {}
-    WailaTrailTracer.savedRoadRegions = {}
+    WailaTrailTracer.savedRegions = { forest = {}, road = {}, building = {} }
     WailaTrailTracer.learnLayerClasses()
     if not WailaTrailTracer.layerClassLearned then
         log("startWholeMapScan: no layer classes could be learned on this map, nothing to scan with")
@@ -292,7 +345,7 @@ function WailaTrailTracer.startWholeMapScan()
         chunksPerSide = chunksPerSide,
         col = 0,
         row = 0,
-        stats = { forestPolygons = 0, forestPoints = 0, trailPolygons = 0, trailPoints = 0, roadPolygons = 0, emptyChunks = 0, totalMs = 0, maxMs = 0 },
+        stats = { forestPolygons = 0, forestPoints = 0, trailPolygons = 0, trailPoints = 0, roadPolygons = 0, buildingPolygons = 0, emptyChunks = 0, totalMs = 0, maxMs = 0 },
         startTime = getTimeSec(),
     }
     log("startWholeMapScan: %d chunk(s) (%.0fm each) queued", chunksPerSide * chunksPerSide, chunkSize)
@@ -316,14 +369,20 @@ function WailaTrailTracer.tickLayerScanStep(state)
 
     local chunkStart = getTimeSec()
     local result = WailaTrailTracer.scanLayerChunk(minX, minZ, state.chunkSize)
+    local buildings = WailaTrailTracer.scanBuildingChunk(minX, minZ, state.chunkSize)
+    WailaTrailTracer.recordRegionPolygons("building", minX, minZ, maxX, maxZ, buildings)
+    if #buildings > 0 then
+        WailaTrailTracer.buildBuildingLayerOverlayIncremental(buildings)
+        stats.buildingPolygons = stats.buildingPolygons + #buildings
+    end
     if result == nil then
         stats.emptyChunks = stats.emptyChunks + 1
-        WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, {})
-        WailaTrailTracer.recordRoadPolygons(minX, minZ, maxX, maxZ, {})
+        WailaTrailTracer.recordRegionPolygons("forest", minX, minZ, maxX, maxZ, {})
+        WailaTrailTracer.recordRegionPolygons("road", minX, minZ, maxX, maxZ, {})
         WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, {})
     else
-        WailaTrailTracer.recordForestPolygons(minX, minZ, maxX, maxZ, result.forest)
-        WailaTrailTracer.recordRoadPolygons(minX, minZ, maxX, maxZ, result.road)
+        WailaTrailTracer.recordRegionPolygons("forest", minX, minZ, maxX, maxZ, result.forest)
+        WailaTrailTracer.recordRegionPolygons("road", minX, minZ, maxX, maxZ, result.road)
         WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, { [6] = result.trail })
         if #result.forest > 0 then
             WailaTrailTracer.buildForestOverlayIncremental(result.forest)
@@ -357,10 +416,11 @@ function WailaTrailTracer.tickLayerScanStep(state)
     WailaTrailTracer.buildTestOverlay({}, true)
     WailaTrailTracer.buildForestOverlayIncremental({}, true)
     WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
+    WailaTrailTracer.buildBuildingLayerOverlayIncremental({}, true)
     local elapsedMs = (getTimeSec() - state.startTime) * 1000
-    log("layer scan done: %d chunk(s) (%d empty), forest %d polygon(s) / %d point(s), trail %d / %d, road %d polygon(s)",
+    log("layer scan done: %d chunk(s) (%d empty), forest %d polygon(s) / %d point(s), trail %d / %d, road %d, building %d polygon(s)",
         state.chunksPerSide * state.chunksPerSide, stats.emptyChunks, stats.forestPolygons, stats.forestPoints,
-        stats.trailPolygons, stats.trailPoints, stats.roadPolygons)
+        stats.trailPolygons, stats.trailPoints, stats.roadPolygons, stats.buildingPolygons)
     log("layer scan cost: %.0fms of scan work (worst chunk %.0fms), %.1fs wall", stats.totalMs, stats.maxMs, elapsedMs / 1000)
     WailaTrailTracer.wholeMapScanState = nil
     return true
