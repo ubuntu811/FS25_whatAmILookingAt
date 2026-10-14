@@ -4,7 +4,7 @@ T.layerClassLearned = true
 
 -- Synthetic chunk (0..64):
 --  * forest disc r=12 at (18,30): forest-floor layer WITH foliage, dirt flecks among grass
---  * parking lot x 36..56, z 16..34: the SAME forest-floor layer, DIRT material, NO foliage
+--  * parking lot x 36..56, z 16..34 with a 12 x 10 placeable footprint inside: the SAME forest-floor layer, DIRT material, NO foliage
 --  * IW-style worn path (gravel, 3m wide, (0,55)->(64,45)) whose layer signal is only dashes
 --  * road 4m wide along z=10
 T.foliageAvailable = function() return true end
@@ -14,6 +14,8 @@ local function world(x, z)
     if (x - 18) ^ 2 + (z - 30) ^ 2 <= 12 * 12 then
         return T.LAYER_CLASS_FOREST, (math.floor(x / 3) % 4 == 0) and 1 or 2
     end
+    -- a placeable on the lot: its own ground layer (no class), stone material
+    if x >= 42 and x <= 54 and z >= 20 and z <= 30 then return nil, 7 end
     if x >= 36 and x <= 56 and z >= 16 and z <= 34 then return T.LAYER_CLASS_FOREST, 1 end
     local lz = 55 - (10 / 64) * x
     if math.abs(z - lz) <= 1.5 and x >= 0 and x <= 64 then
@@ -41,7 +43,7 @@ for _, p in ipairs(r.trail) do
     local cx, cz = centroid(p)
     if cx >= 36 and cx <= 56 and cz >= 16 and cz <= 34 then lotTrail = lotTrail + polygonArea(p) else pathTrail = pathTrail + polygonArea(p) end
 end
-check("parking lot is worn ground (trail layer), about 360 m2", lotTrail > 280 and lotTrail < 440)
+check("parking lot is worn ground (trail layer), about 360 m2 with the placeable footprint filled in", lotTrail > 320 and lotTrail < 440)
 check("worn path is a continuous trail, about 190 m2", pathTrail > 120 and pathTrail < 260)
 local leak = false
 for _, p in ipairs(r.trail) do

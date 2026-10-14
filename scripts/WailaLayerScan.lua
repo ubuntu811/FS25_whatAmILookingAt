@@ -34,6 +34,13 @@ WailaTrailTracer.LAYER_SCAN_TRAIL_EDGE_GAP_CELLS = 1
 -- Position-independent island/hole rule (a component touching the window edge
 -- is never judged, so seams are consistent): smaller than this is dropped.
 WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS = 25
+-- Holes: a placeable on a yard or in a wood carries its own ground layer, so its
+-- footprint is neither forest nor worn material and shows up as an island. An
+-- ENCLOSED hole up to this size is filled (a hole touching the window edge never
+-- is, so chunk seams stay consistent). Trail (yard) holes may be big: a placeable
+-- footprint; forest holes smaller: a real clearing should stay a clearing.
+WailaTrailTracer.LAYER_SCAN_TRAIL_MIN_HOLE_CELLS = 400
+WailaTrailTracer.LAYER_SCAN_FOREST_MIN_HOLE_CELLS = 100
 WailaTrailTracer.LAYER_SCAN_MIN_THIN_CELLS = 6
 WailaTrailTracer.LAYER_SCAN_FOREST_TOLERANCE = 2.0
 WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE = 1.0
@@ -202,7 +209,7 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
             if closeRadius > 0 then
                 area = erodeMask(dilateMask(forestMask, w, closeRadius), w, closeRadius)
             end
-            WailaTrailTracer.cleanComponents(area, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS, WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS)
+            WailaTrailTracer.cleanComponents(area, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_AREA_CELLS, WailaTrailTracer.LAYER_SCAN_FOREST_MIN_HOLE_CELLS)
         end
 
         -- trail = worn material clear of the forest area's edge
@@ -225,7 +232,7 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
                 if closeRadius > 0 then
                     trail = erodeMask(dilateMask(trail, w, closeRadius), w, closeRadius)
                 end
-                WailaTrailTracer.cleanComponents(trail, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_THIN_CELLS, 0)
+                WailaTrailTracer.cleanComponents(trail, noProtectedRows, w, WailaTrailTracer.LAYER_SCAN_MIN_THIN_CELLS, WailaTrailTracer.LAYER_SCAN_TRAIL_MIN_HOLE_CELLS)
             end
         end
 
