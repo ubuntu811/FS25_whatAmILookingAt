@@ -855,6 +855,8 @@ local function sampleSplineChain(spline, stepMeters)
     return chain
 end
 
+WailaTrailTracer.sampleSplineChain = sampleSplineChain
+
 -- Real request ("a scanner that sees where trees are is valuable input
 -- for IW's replant feature too... go ahead, make sure both are drawn in
 -- distinct colors"): CollisionFlag.TREE (bit 11, "A tree") and
@@ -1206,6 +1208,31 @@ end
 -- One terrain read per cell then classifies it -- no windows, no jitter.
 WailaTrailTracer.LAYER_LEARN_MIN_SPLINE_SHARE = 0.25
 WailaTrailTracer.LAYER_LEARN_MAX_MAP_SHARE = 0.10
+-- a layer that is not the main road paint but is far more common along the
+-- road splines than across the map (road shoulders, patched asphalt, gravel
+-- margins) is road too: needs a real share of the samples and an enrichment
+WailaTrailTracer.LAYER_LEARN_MIN_ENRICHED_SHARE = 0.03
+WailaTrailTracer.LAYER_LEARN_MIN_ENRICHMENT = 5.0
+WailaTrailTracer.LAYER_LEARN_MIN_ENRICHED_SAMPLES = 12
+
+-- true when a layer with this many spline samples (of splineTotal) and this
+-- whole-map share is a road layer; second return is the reason, for the log
+function WailaTrailTracer.isRoadLayerStat(samples, splineTotal, mapShare)
+    local splineShare = samples / math.max(1, splineTotal)
+    if mapShare > WailaTrailTracer.LAYER_LEARN_MAX_MAP_SHARE then
+        return false, "too common on the map"
+    end
+    if splineShare >= WailaTrailTracer.LAYER_LEARN_MIN_SPLINE_SHARE then
+        return true, "main road paint"
+    end
+    local enrichment = splineShare / math.max(mapShare, 0.0005)
+    if samples >= WailaTrailTracer.LAYER_LEARN_MIN_ENRICHED_SAMPLES
+        and splineShare >= WailaTrailTracer.LAYER_LEARN_MIN_ENRICHED_SHARE
+        and enrichment >= WailaTrailTracer.LAYER_LEARN_MIN_ENRICHMENT then
+        return true, string.format("road margin, %.0fx enriched", enrichment)
+    end
+    return false, string.format("%.1fx enriched", enrichment)
+end
 WailaTrailTracer.LAYER_LEARN_MIN_FOREST_SHARE = 0.60
 WailaTrailTracer.LAYER_LEARN_MIN_FOREST_CELLS = 8
 WailaTrailTracer.LAYER_CLASS_ROAD = 1
@@ -1297,6 +1324,7 @@ function WailaTrailTracer.learnLayerClasses()
     local startTime = getTimeSec()
     layerClassByKey = {}
     WailaTrailTracer.layerClassLearned = false
+    WailaTrailTracer.roadLayerLearned = false
 
     local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
     local worldMin = -terrainSize * 0.5
@@ -1343,10 +1371,13 @@ function WailaTrailTracer.learnLayerClasses()
     for key, count in pairs(splineCounts) do
         local splineShare = count / splineTotal
         local mapShare = (mapCounts[key] or 0) / math.max(1, mapTotal)
-        if splineShare >= WailaTrailTracer.LAYER_LEARN_MIN_SPLINE_SHARE and mapShare <= WailaTrailTracer.LAYER_LEARN_MAX_MAP_SHARE then
+        local isRoad, why = WailaTrailTracer.isRoadLayerStat(count, splineTotal, mapShare)
+        if isRoad then
             layerClassByKey[key] = WailaTrailTracer.LAYER_CLASS_ROAD
             roadKeys = roadKeys + 1
-            log("LayerClasses: ROAD   %s  (%.0f%% of spline samples, %.1f%% of map)", layerKeyToString(key), splineShare * 100, mapShare * 100)
+            log("LayerClasses: ROAD   %s  (%.0f%% of spline samples, %.1f%% of map, %s)", layerKeyToString(key), splineShare * 100, mapShare * 100, why)
+        elseif splineShare >= 0.01 then
+            log("LayerClasses: not road %s  (%.1f%% of spline samples, %.1f%% of map, %s)", layerKeyToString(key), splineShare * 100, mapShare * 100, why)
         end
     end
     for key, count in pairs(mapCounts) do
@@ -1360,6 +1391,7 @@ function WailaTrailTracer.learnLayerClasses()
     end
 
     WailaTrailTracer.layerClassLearned = roadKeys + forestKeys > 0
+    WailaTrailTracer.roadLayerLearned = roadKeys > 0
     log("LayerClasses: learned %d road + %d forest layer(s) from %d spline(s) / %d spline sample(s), %d map cell(s), %.0fms",
         roadKeys, forestKeys, splineCount, splineTotal, mapTotal, (getTimeSec() - startTime) * 1000)
 end

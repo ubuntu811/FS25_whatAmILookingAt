@@ -411,6 +411,174 @@ function WailaTrailTracer.scanBuildingChunk(minX, minZ, chunkSize)
     return WailaTrailTracer.traceMaskPolygons(mask, minX, minZ, n, cell, WailaTrailTracer.BUILDING_LAYER_CURVE_TOLERANCE)
 end
 
+-- ===== Roads by raycast (maps whose road meshes carry the ROAD collision bit) =====
+-- Real finding (Estancia Lapacho): the asphalt is a mesh node in collision group
+-- ROAD | AI_DRIVABLE, 0.1 m above the terrain, while its paint is the same as the
+-- surrounding ground, so no learned layer can see it. WAILA's own crosshair reads
+-- it from the collision stack; the scan can ask the same thing with a downward ray.
+-- Not every map has it (CreativeHorizon's roads are terrain decals), so each map
+-- is probed along its road splines first.
+WailaTrailTracer.ROAD_RAY_CELL_SIZE = 2.0
+WailaTrailTracer.ROAD_RAY_PREFILTER_STRIDE = 4.0
+WailaTrailTracer.ROAD_RAY_START_ABOVE = 5.0
+WailaTrailTracer.ROAD_RAY_LENGTH = 10.0
+WailaTrailTracer.ROAD_RAY_PROBE_MIN_SHARE = 0.5
+WailaTrailTracer.ROAD_RAY_PROBE_MAX_SAMPLES = 400
+WailaTrailTracer.ROAD_RAY_MIN_CELLS = 6
+WailaTrailTracer.ROAD_RAY_MIN_HOLE_CELLS = 16
+WailaTrailTracer.ROAD_RAY_CURVE_TOLERANCE = 0.7
+
+local roadRayTarget = {}
+function roadRayTarget:onRoadRayCallback(hitObjectId)
+    if hitObjectId ~= nil and hitObjectId ~= 0 then
+        self.hit = true
+    end
+    return false
+end
+
+local function roadRayHitsAt(x, z)
+    local terrainY = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z)
+    roadRayTarget.hit = false
+    raycastClosest(x, terrainY + WailaTrailTracer.ROAD_RAY_START_ABOVE, z, 0, -1, 0, WailaTrailTracer.ROAD_RAY_LENGTH, "onRoadRayCallback", roadRayTarget, CollisionFlag.ROAD)
+    return roadRayTarget.hit
+end
+
+-- Share of road-spline samples that sit on a ROAD collider; a map where most of
+-- them do has collision roads and the raycast pass is used.
+function WailaTrailTracer.probeRoadCollision(chains)
+    local total = 0
+    for _, chain in ipairs(chains) do
+        total = total + #chain
+    end
+    if total == 0 then
+        return 0, 0, 0
+    end
+    local every = math.max(1, math.ceil(total / WailaTrailTracer.ROAD_RAY_PROBE_MAX_SAMPLES))
+    local tested, hits, index = 0, 0, 0
+    for _, chain in ipairs(chains) do
+        for _, point in ipairs(chain) do
+            index = index + 1
+            if index % every == 0 then
+                tested = tested + 1
+                if roadRayHitsAt(point[1], point[2]) then
+                    hits = hits + 1
+                end
+            end
+        end
+    end
+    return tested > 0 and hits / tested or 0, hits, tested
+end
+
+-- Road polygons for one chunk: 4 m prefilter, then a 2 m grid, closed and traced.
+function WailaTrailTracer.scanRoadRayChunk(minX, minZ, chunkSize)
+    local stride = WailaTrailTracer.ROAD_RAY_PREFILTER_STRIDE
+    local anyHit = false
+    for dz = stride * 0.5, chunkSize, stride do
+        for dx = stride * 0.5, chunkSize, stride do
+            if roadRayHitsAt(minX + dx, minZ + dz) then
+                anyHit = true
+                break
+            end
+        end
+        if anyHit then
+            break
+        end
+    end
+    if not anyHit then
+        return {}
+    end
+
+    local cell = WailaTrailTracer.ROAD_RAY_CELL_SIZE
+    local n = math.floor(chunkSize / cell)
+    local mask, count = {}, 0
+    for row = 0, n - 1 do
+        local line = {}
+        local z = minZ + (row + 0.5) * cell
+        for col = 0, n - 1 do
+            local hit = roadRayHitsAt(minX + (col + 0.5) * cell, z)
+            line[col] = hit
+            if hit then
+                count = count + 1
+            end
+        end
+        mask[row] = line
+    end
+    if count == 0 then
+        return {}
+    end
+    mask = erodeMask(dilateMask(mask, n, 1), n, 1)
+    WailaTrailTracer.cleanComponents(mask, noProtectedRows, n, WailaTrailTracer.ROAD_RAY_MIN_CELLS, WailaTrailTracer.ROAD_RAY_MIN_HOLE_CELLS)
+    return WailaTrailTracer.traceMaskPolygons(mask, minX, minZ, n, cell, WailaTrailTracer.ROAD_RAY_CURVE_TOLERANCE)
+end
+
+-- ===== Roads from splines (maps whose paint does not show roads) =====
+WailaTrailTracer.ROAD_SPLINE_FALLBACK_WIDTH = 6.0
+WailaTrailTracer.ROAD_SPLINE_FALLBACK_STEP = 6.0
+
+function WailaTrailTracer.collectRoadSplineChains()
+    local chains = {}
+    if g_currentMission ~= nil and g_currentMission.aiSystem ~= nil then
+        for spline in pairs(g_currentMission.aiSystem:getRoadSplines()) do
+            local chain = WailaTrailTracer.sampleSplineChain(spline, WailaTrailTracer.ROAD_SPLINE_FALLBACK_STEP)
+            if chain ~= nil and #chain >= 2 then
+                table.insert(chains, chain)
+            end
+        end
+    end
+    return chains
+end
+
+-- Chains of {x, z} -> ribbon polygons (left edge forward, right edge back),
+-- cut at chunk borders so each ribbon belongs to exactly one chunk (the save
+-- file is per chunk): returns { ["col_row"] = { polygon, ... } }. A piece
+-- takes one extra point from the next chunk so neighbouring pieces overlap.
+function WailaTrailTracer.ribbonsFromChains(chains, width, originX, originZ, chunkSize)
+    local half = width * 0.5
+    local result = {}
+    for _, chain in ipairs(chains) do
+        local function chunkOf(point)
+            return math.floor((point[1] - originX) / chunkSize), math.floor((point[2] - originZ) / chunkSize)
+        end
+        local startIndex = 1
+        while startIndex < #chain do
+            local col, row = chunkOf(chain[startIndex])
+            local endIndex = startIndex
+            while endIndex < #chain do
+                local nextCol, nextRow = chunkOf(chain[endIndex + 1])
+                if nextCol ~= col or nextRow ~= row then
+                    break
+                end
+                endIndex = endIndex + 1
+            end
+            local lastIndex = math.min(endIndex + 1, #chain)
+            if lastIndex > startIndex then
+                local left, right = {}, {}
+                for i = startIndex, lastIndex do
+                    local a = chain[math.max(i - 1, startIndex)]
+                    local b = chain[math.min(i + 1, lastIndex)]
+                    local dx, dz = b[1] - a[1], b[2] - a[2]
+                    local length = math.sqrt(dx * dx + dz * dz)
+                    if length > 0 then
+                        local nx, nz = -dz / length * half, dx / length * half
+                        table.insert(left, { chain[i][1] + nx, chain[i][2] + nz })
+                        table.insert(right, { chain[i][1] - nx, chain[i][2] - nz })
+                    end
+                end
+                if #left >= 2 then
+                    local polygon = {}
+                    for _, point in ipairs(left) do table.insert(polygon, point) end
+                    for i = #right, 1, -1 do table.insert(polygon, right[i]) end
+                    local key = col .. "_" .. row
+                    result[key] = result[key] or {}
+                    table.insert(result[key], polygon)
+                end
+            end
+            startIndex = endIndex + 1
+        end
+    end
+    return result
+end
+
 -- Starts the whole-map scan (TaskMap's Shift+G). wholeMapScanState drives
 -- TaskMap's progress bar and the save/load mutual-exclusion guards;
 -- tickWholeMapScan runs tickLayerScanStep inside the per-frame budget.
@@ -425,13 +593,31 @@ function WailaTrailTracer.startWholeMapScan()
     WailaTrailTracer.savedRegions = { forest = {}, road = {}, building = {} }
     WailaTrailTracer.learnLayerClasses()
     if not WailaTrailTracer.layerClassLearned then
-        log("startWholeMapScan: no layer classes could be learned on this map, nothing to scan with")
-        return
+        -- Not fatal (Estancia Lapacho: the paint does not tell roads from
+        -- ground): trees, worn ground and buildings need no learned class.
+        log("startWholeMapScan: no layer classes learned on this map, scanning without them")
     end
 
     local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
     local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
     local chunksPerSide = math.ceil(terrainSize / chunkSize)
+
+    -- Road source, best first: collision (ROAD colliders under the splines),
+    -- then the learned paint layer, then the splines themselves as ribbons.
+    local splineRoads, roadRay = nil, false
+    local chains = WailaTrailTracer.collectRoadSplineChains()
+    if #chains > 0 then
+        local share, hits, tested = WailaTrailTracer.probeRoadCollision(chains)
+        roadRay = share >= WailaTrailTracer.ROAD_RAY_PROBE_MIN_SHARE
+        log("startWholeMapScan: road collision probe %d/%d spline samples on a ROAD collider (%.0f%%): %s",
+            hits, tested, share * 100, roadRay and "roads by raycast" or "not used")
+    end
+    if not roadRay and not WailaTrailTracer.roadLayerLearned then
+        if #chains > 0 then
+            splineRoads = WailaTrailTracer.ribbonsFromChains(chains, WailaTrailTracer.ROAD_SPLINE_FALLBACK_WIDTH, -terrainSize * 0.5, -terrainSize * 0.5, chunkSize)
+            log("startWholeMapScan: no road layer learned, drawing %d road spline(s) as %.0fm ribbons", #chains, WailaTrailTracer.ROAD_SPLINE_FALLBACK_WIDTH)
+        end
+    end
     WailaTrailTracer.wholeMapScanState = {
         originX = -terrainSize * 0.5,
         originZ = -terrainSize * 0.5,
@@ -441,6 +627,8 @@ function WailaTrailTracer.startWholeMapScan()
         row = 0,
         stats = { forestPolygons = 0, forestPoints = 0, trailPolygons = 0, trailPoints = 0, roadPolygons = 0, buildingPolygons = 0, emptyChunks = 0, totalMs = 0, maxMs = 0 },
         startTime = getTimeSec(),
+        splineRoads = splineRoads,
+        roadRay = roadRay,
     }
     log("startWholeMapScan: %d chunk(s) (%.0fm each) queued", chunksPerSide * chunksPerSide, chunkSize)
 end
@@ -472,11 +660,9 @@ function WailaTrailTracer.tickLayerScanStep(state)
     if result == nil then
         stats.emptyChunks = stats.emptyChunks + 1
         WailaTrailTracer.recordRegionPolygons("forest", minX, minZ, maxX, maxZ, {})
-        WailaTrailTracer.recordRegionPolygons("road", minX, minZ, maxX, maxZ, {})
         WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, {})
     else
         WailaTrailTracer.recordRegionPolygons("forest", minX, minZ, maxX, maxZ, result.forest)
-        WailaTrailTracer.recordRegionPolygons("road", minX, minZ, maxX, maxZ, result.road)
         WailaTrailTracer.recordScannedPolygons(minX, minZ, maxX, maxZ, { [6] = result.trail })
         if #result.forest > 0 then
             WailaTrailTracer.buildForestOverlayIncremental(result.forest)
@@ -484,14 +670,22 @@ function WailaTrailTracer.tickLayerScanStep(state)
         if #result.trail > 0 then
             WailaTrailTracer.buildTestOverlay({ [6] = result.trail })
         end
-        if #result.road > 0 then
-            WailaTrailTracer.buildRoadLayerOverlayIncremental(result.road)
-        end
         stats.forestPolygons = stats.forestPolygons + #result.forest
         stats.forestPoints = stats.forestPoints + countPoints(result.forest)
         stats.trailPolygons = stats.trailPolygons + #result.trail
         stats.trailPoints = stats.trailPoints + countPoints(result.trail)
-        stats.roadPolygons = stats.roadPolygons + #result.road
+    end
+
+    local roads = (result ~= nil and result.road) or {}
+    if state.roadRay then
+        roads = WailaTrailTracer.scanRoadRayChunk(minX, minZ, state.chunkSize)
+    elseif state.splineRoads ~= nil then
+        roads = state.splineRoads[state.col .. "_" .. state.row] or {}
+    end
+    WailaTrailTracer.recordRegionPolygons("road", minX, minZ, maxX, maxZ, roads)
+    if #roads > 0 then
+        WailaTrailTracer.buildRoadLayerOverlayIncremental(roads)
+        stats.roadPolygons = stats.roadPolygons + #roads
     end
     local chunkMs = (getTimeSec() - chunkStart) * 1000
     stats.totalMs = stats.totalMs + chunkMs
@@ -517,6 +711,13 @@ function WailaTrailTracer.tickLayerScanStep(state)
         stats.trailPolygons, stats.trailPoints, stats.roadPolygons, stats.buildingPolygons)
     log("layer scan cost: %.0fms of scan work (worst chunk %.0fms), %.1fs wall", stats.totalMs, stats.maxMs, elapsedMs / 1000)
     WailaTrailTracer.wholeMapScanState = nil
+
+    -- One button, one scan: the field index sweeps right after the layers
+    -- (not alongside them, so the per-frame cost stays what it was).
+    local fieldIndex = Waila ~= nil and Waila.indices ~= nil and Waila.indices.field or nil
+    if fieldIndex ~= nil and fieldIndex.requestFullSweep ~= nil then
+        fieldIndex:requestFullSweep()
+    end
     return true
 end
 
