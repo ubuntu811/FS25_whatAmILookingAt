@@ -155,6 +155,7 @@ function FS25WhatAmILookingAt:setupComponents()
         { label = "Build tree/water overlay near player", run = function() mod:onBuildFeatureOverlay() end },
         { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
         { label = "Build layer-class overlay near player (road orange, forest green)", run = function() mod:onBuildLayerClassOverlay() end },
+        { label = "Probe placeable footprints around the player (log + white rectangles)", run = function() mod:onProbePlaceables() end },
         { label = "TOGGLE overlay debug colours (loud, distinct per layer)", run = function() WailaTrailTracer.toggleDebugColors() end },
     })
 
@@ -462,6 +463,21 @@ end
 
 function FS25WhatAmILookingAt:onDumpTerrainLayers()
     self.debugTools:dumpTerrainLayers()
+end
+
+function FS25WhatAmILookingAt:onProbePlaceables()
+    local x, z
+    if g_localPlayer ~= nil and g_localPlayer.getPosition ~= nil then
+        local px, _, pz = g_localPlayer:getPosition()
+        x, z = px, pz
+    elseif self.current ~= nil and self.current.hit ~= nil then
+        x, z = self.current.hit.x, self.current.hit.z
+    end
+    if x == nil then
+        log("[PlaceableProbe] no player position or target")
+        return
+    end
+    WailaPlaceableProbe.run(x, z)
 end
 
 function FS25WhatAmILookingAt:onBuildLayerClassOverlay()
