@@ -57,4 +57,23 @@ for _, list in ipairs({ r.forest, r.trail }) do for _, p in ipairs(list) do poin
 check("few points (curve fit)", points < 150)
 T.getLayerCellAt = function() return nil, 2 end
 check("empty chunk returns nil", T.scanLayerChunk(1000, 1000, 64) == nil)
+
+-- A big yard with a big placeable pad (own stone layer, 44 x 44 m: larger than the hole-size limit
+-- and nearly the size of a chunk): the pad belongs to the yard, no island.
+do
+    T.foliageAvailable = function() return true end
+    T.hasFoliageAt = function() return false end
+    T.getLayerCellAt = function(x, z)
+        if x >= 16 and x <= 60 and z >= 16 and z <= 60 then return nil, 7 end            -- the pad
+        if x >= 4 and x <= 72 and z >= 4 and z <= 72 then return T.LAYER_CLASS_FOREST, 1 end -- the yard
+        return nil, 2
+    end
+    local yard = T.scanLayerChunk(0, 0, 64)
+    local yardArea = totalArea(yard.trail)
+    local expected = 60 * 60            -- the yard inside the chunk window, x/z 4..64
+    check("yard with a big placeable pad: one polygon, no island", #yard.trail == 1)
+    check("yard area includes the pad (no hole)", yardArea > expected * 0.9)
+    check("a yard is not forest", #yard.forest == 0)
+end
+
 finish("layer_scan_test")

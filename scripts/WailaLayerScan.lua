@@ -46,6 +46,18 @@ WailaTrailTracer.LAYER_SCAN_FOREST_TOLERANCE = 2.0
 WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE = 1.0
 -- materials that mean worn ground outside the learned classes (DIRT, GRAVEL)
 local WORN_MATERIALS = { [1] = true, [6] = true }
+local STONE_MATERIAL = 7
+
+-- Worn / built ground: dirt or gravel material, or stone material on a layer that
+-- is neither road nor forest floor. The second case is a placeable's own ground
+-- (a factory pad is a gray stone layer of its own): built ground belongs to the
+-- yard around it however big it is, which a hole-size rule can never promise.
+local function isWornCell(class, materialId, roadClass)
+    if class == roadClass then
+        return false
+    end
+    return WORN_MATERIALS[materialId] == true or (class == nil and materialId == STONE_MATERIAL)
+end
 -- closing radius that joins gaps in a worn path
 WailaTrailTracer.LAYER_SCAN_TRAIL_CLOSE_RADIUS = 1
 
@@ -151,7 +163,7 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
                 local x = winX + (col + 0.5) * cell
                 if x > -half and x < half then
                     local class, materialId = cellAt(x, z)
-                    if class ~= nil or WORN_MATERIALS[materialId] then
+                    if class ~= nil or isWornCell(class, materialId, roadClass) then
                         anyHit = true
                         break
                     end
@@ -179,7 +191,7 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
             local isForest, worn = false, false
             if x > -half and x < half and z > -half and z < half then
                 local class, materialId = cellAt(x, z)
-                worn = class ~= roadClass and WORN_MATERIALS[materialId] == true
+                worn = isWornCell(class, materialId, roadClass)
                 isForest = class == forestClass and (not useFoliage or hasFoliageAt(x, z))
                 if (isForest or worn) and FSDensityMapUtil.getFieldDataAtWorldPosition(x, 0, z) then
                     isForest, worn = false, false
