@@ -215,6 +215,24 @@ function WailaHud:drawLines(lines)
 
     local x = boxLeft + self.paddingX
 
+    -- The fixed width is only the minimum: long lines (the collision mask
+    -- description) used to run out of the panel. Grow the box to the widest
+    -- line, and truncate only what would still run off the screen.
+    if getTextWidth ~= nil then
+        local widest = 0
+        for _, entry in ipairs(lines) do
+            setTextBold(entry.bold)
+            widest = math.max(widest, getTextWidth(self.textSize, entry.text))
+        end
+        setTextBold(false)
+        local maxBoxWidth = 1 - boxLeft - 0.005
+        boxWidth = math.min(math.max(boxWidth, widest + self.paddingX * 2), maxBoxWidth)
+        local maxTextWidth = boxWidth - self.paddingX * 2
+        for _, entry in ipairs(lines) do
+            entry.text = self:truncateToWidth(entry.text, self.textSize, maxTextWidth)
+        end
+    end
+
     -- Cumulative, not #lines * lineHeight -- a gapBefore line costs extra
     -- height that a flat multiply can't account for.
     local contentHeight = 0
