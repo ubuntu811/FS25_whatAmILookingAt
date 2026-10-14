@@ -111,34 +111,23 @@ end
 
 local MAX_NODES = 4000
 
--- World x/z corners of a node's local bounding box, or nil if the engine
--- function is not available / returns nothing usable.
+-- World x/z corners of a node's physics body (engine: getRigidBodyAABB, world
+-- space, output order minX, maxX, minY, maxY, minZ, maxZ -- nil if the node has
+-- no rigid body). An axis-aligned box: exact for a wing aligned with the world
+-- axes, larger than the wall for a rotated one.
 local function shapeBoxCorners(node)
-    if getShapeBoundingBox == nil then
+    if getRigidBodyAABB == nil then
         return nil
     end
-    local ok, minX, minY, minZ, maxX, maxY, maxZ = pcall(getShapeBoundingBox, node)
-    if not ok or maxZ == nil or type(minX) ~= "number" then
+    local ok, minX, maxX, _, _, minZ, maxZ = pcall(getRigidBodyAABB, node)
+    if not ok or type(minX) ~= "number" or maxZ == nil then
         return nil
     end
-    local corners = {}
-    for _, c in ipairs({ { minX, minZ }, { maxX, minZ }, { maxX, maxZ }, { minX, maxZ } }) do
-        local okWorld, wx, _, wz = pcall(localToWorld, node, c[1], 0, c[2])
-        if not okWorld or wx == nil then
-            return nil
-        end
-        corners[#corners + 1] = { wx, wz }
-    end
-    return corners
+    return { { minX, minZ }, { maxX, minZ }, { maxX, maxZ }, { minX, maxZ } }
 end
 
+-- A static collision body: static-object or building collision group.
 local function isCollisionShape(node)
-    if getHasClassId ~= nil and ClassIds ~= nil and ClassIds.SHAPE ~= nil then
-        local ok, isShape = pcall(getHasClassId, node, ClassIds.SHAPE)
-        if not ok or not isShape then
-            return false
-        end
-    end
     if CollisionFlag == nil or CollisionFlag.getHasGroupFlagSet == nil then
         return false
     end
@@ -147,7 +136,7 @@ local function isCollisionShape(node)
     return (ok and hasStatic) or (ok2 and hasBuilding)
 end
 
--- Collision shapes under a placeable's root node -> { { name, corners }, ... }.
+-- Static collision bodies under a placeable's root node -> { { name, corners }, ... }.
 function WailaPlaceableProbe.collectShapeBoxes(rootNode)
     local boxes, visited = {}, 0
     local function walk(node, depth)
@@ -187,14 +176,23 @@ function WailaPlaceableProbe.run(centerX, centerZ)
         return
     end
 
-    log("engine functions: getShapeBoundingBox=%s getHasClassId=%s getNumOfChildren=%s getChildAt=%s worldToLocal=%s CollisionFlag.getHasGroupFlagSet=%s",
-        type(getShapeBoundingBox), type(getHasClassId), type(getNumOfChildren), type(getChildAt), type(worldToLocal),
+    log("engine functions: getRigidBodyAABB=%s getNumOfChildren=%s getChildAt=%s worldToLocal=%s CollisionFlag.getHasGroupFlagSet=%s",
+        type(getRigidBodyAABB), type(getNumOfChildren), type(getChildAt), type(worldToLocal),
         type(CollisionFlag ~= nil and CollisionFlag.getHasGroupFlagSet or nil))
     local polygons, shapePolygons, perPath = {}, {}, {}
     local placeablesSeen, withAreas, detailed, withShapes = 0, 0, 0, 0
+    -- nearest first, so the detailed log lines describe what the player is standing next to
+    local candidates = {}
     for _, placeable in ipairs(placeableSystem.placeables) do
         local px, _, pz = nodeXYZ(placeable.rootNode)
         if px ~= nil and (px - centerX) ^ 2 + (pz - centerZ) ^ 2 <= RADIUS * RADIUS then
+            candidates[#candidates + 1] = { placeable = placeable, px = px, pz = pz, distance = (px - centerX) ^ 2 + (pz - centerZ) ^ 2 }
+        end
+    end
+    table.sort(candidates, function(a, b) return a.distance < b.distance end)
+    for _, candidate in ipairs(candidates) do
+        local placeable, px, pz = candidate.placeable, candidate.px, candidate.pz
+        do
             placeablesSeen = placeablesSeen + 1
             local areas = WailaPlaceableProbe.collectAreas(placeable)
             if #areas > 0 then
@@ -213,7 +211,7 @@ function WailaPlaceableProbe.run(centerX, centerZ)
             for _, box in ipairs(boxes) do
                 shapePolygons[#shapePolygons + 1] = box.corners
             end
-            if detailed < 4 then
+            if detailed < 6 then
                 detailed = detailed + 1
                 local specs = {}
                 for key, value in pairs(placeable) do
