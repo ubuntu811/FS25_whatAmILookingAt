@@ -2614,6 +2614,13 @@ function WailaTrailTracer.tickLoadFromXML()
     end
 
     local tickStart = getTimeSec()
+    -- the load is queued while the game is still loading its mission; time the
+    -- restore from its first tick, not from the queueing
+    if not state.timingStarted then
+        state.timingStarted = true
+        state.startTime = tickStart
+        state.lastProgressLogTime = tickStart
+    end
     local pendingCount = 0
     while state.index <= #state.workItems do
         local item = state.workItems[state.index]
