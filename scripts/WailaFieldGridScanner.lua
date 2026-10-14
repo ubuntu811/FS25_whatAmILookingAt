@@ -60,8 +60,11 @@ function WailaFieldGridScanner:reset()
     self.cols = math.max(1, math.ceil(terrainSize / WailaFieldGridScanner.CELL_SIZE))
     self.rows = self.cols
     self.claimed = {}
+    self.holes = {}
     self.sweepIndex = 0
     self.activeTracer = nil
+    self.activeSeedCol = nil
+    self.activeSeedRow = nil
     self.lastLoggedRow = -1
 end
 
@@ -117,6 +120,21 @@ function WailaFieldGridScanner:claimPolygonCells(polygon)
             end
         end
     end
+end
+
+-- Within tolerance of the polygon's edge, or inside it. Used to recognise
+-- "this seed's walk ends at a hole we already traced".
+local function isNearPolygon(polygon, x, z, tolerance)
+    if WailaUtil.getIsPosInsidePolygon(polygon, x, z) then
+        return true
+    end
+    local v = polygon:getVertices()
+    for i = 1, #v - 3, 2 do
+        if MathUtil.getDistanceToLineSegment2D(v[i], v[i + 1], v[i + 2], v[i + 3], x, z) <= tolerance then
+            return true
+        end
+    end
+    return false
 end
 
 -- Metadata only now, not a merge decision -- see file header. A single
@@ -216,15 +234,48 @@ function WailaFieldGridScanner:update(timeBudgetSec)
             local remaining = timeBudgetSec - (getTimeSec() - startTime)
             local stillTracing = self.activeTracer:update(math.max(remaining, 0))
 
-            if not stillTracing then
+            -- the walk to the edge is done: if that edge belongs to a hole we
+            -- already traced, drop this trace (see the hole note below)
+            local dropped = false
+            if stillTracing and not self.activeEdgeChecked and #self.activeTracer.boundaryPositions >= 1 then
+                self.activeEdgeChecked = true
+                local edge = self.activeTracer.boundaryPositions[1]
+                local tolerance = 2 * self.activeTracer.terrainDetailResolution
+                for _, hole in ipairs(self.holes) do
+                    if isNearPolygon(hole, edge[1], edge[2], tolerance) then
+                        self:markClaimed(self.activeSeedCol, self.activeSeedRow)
+                        self.activeTracer = nil
+                        dropped = true
+                        break
+                    end
+                end
+            end
+
+            if not dropped and not stillTracing then
                 local polygon = self.activeTracer:toPolygon()
                 local seedX, seedZ = self.activeTracer.startX, self.activeTracer.startZ
                 self.activeTracer = nil
 
                 self:claimPolygonCells(polygon)
 
-                local areaSqm = polygon:getArea()
-                if Waila.debugFieldTracing then
+                -- The seed was on field, so the outline of ITS field contains
+                -- it. One that doesn't is a hole boundary (the +z walk ran
+                -- into a void inside the field: farmyard, pond, forest
+                -- island): not a field, and the cells it claims are the
+                -- void's, not the field's. Without this every field cell
+                -- whose walk hit the same hole registered it again (211
+                -- "fields" on a small map, 27s).
+                local seedIsInside = WailaUtil.getIsPosInsidePolygon(polygon, seedX, seedZ)
+                if self.activeSeedCol ~= nil then
+                    self:markClaimed(self.activeSeedCol, self.activeSeedRow)
+                end
+                if not seedIsInside then
+                    table.insert(self.holes, polygon)
+                    polygon = nil
+                end
+
+                local areaSqm = polygon ~= nil and polygon:getArea() or nil
+                if polygon ~= nil and Waila.debugFieldTracing then
                     local vertexParts = {}
                     for _, v in ipairs(polygon:getVertices()) do
                         table.insert(vertexParts, string.format("%.2f", v))
@@ -272,6 +323,12 @@ function WailaFieldGridScanner:update(timeBudgetSec)
                         -- just confirmed on-field, but avoid retrying this
                         -- exact cell forever if it does.
                         self:markClaimed(col, row)
+                    else
+                        -- ask update() to stop once the walk to the field edge is
+                        -- done, so the start point can be checked against known holes
+                        self.activeTracer.stopAfterSeek = true
+                        self.activeEdgeChecked = false
+                        self.activeSeedCol, self.activeSeedRow = col, row
                     end
                 else
                     self:markClaimed(col, row)

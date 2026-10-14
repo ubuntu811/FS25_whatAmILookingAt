@@ -57,6 +57,7 @@ WailaFieldIndex.VEHICLE_LEFT_FIELD = nextMessageTypeId()
 WailaFieldIndex.SCAN_BUDGET_SEC = 0.003
 WailaFieldIndex.RESWEEP_FALLBACK_INTERVAL = 180000
 WailaFieldIndex.VEHICLE_CHECK_INTERVAL = 500
+WailaFieldIndex.STARTUP_SWEEP_DELAY_MS = 20000
 WailaFieldIndex.BLOB_MATCH_RADIUS = 150
 WailaFieldIndex.SAVEGAME_FILENAME = "waila.xml"
 
@@ -91,6 +92,7 @@ function WailaFieldIndex.new()
     -- WailaField means density-map reads, which aren't bound that early
     -- (same load-order lesson SmartMinimapAuto already learned once).
     self.needsInitialRefresh = false
+    self.cacheTrusted = false
 
     return self
 end
@@ -117,6 +119,18 @@ function WailaFieldIndex:startFullSweep()
     self.isSweeping = true
     self.sweepStartTime = getTimeSec()
     log("[WailaFieldIndex] Field sweep started")
+end
+
+-- Whole-map scan (Shift+G) entry point: sweep now, even if a saved field
+-- list was trusted at startup. false if the scanner is not ready yet or a
+-- sweep is already running.
+function WailaFieldIndex:requestFullSweep()
+    if self.scanner == nil or self.isSweeping then
+        return false
+    end
+    self.startupSweepDelayMs = nil
+    self:startFullSweep()
+    return true
 end
 
 function WailaFieldIndex:onFinishedGrowthPeriod()
@@ -191,7 +205,9 @@ function WailaFieldIndex:advanceFieldScan()
     local labelX, labelZ, sampleX, sampleZ, areaSqm, riceField, sweepCompleted, boundary =
         self.scanner:update(WailaFieldIndex.SCAN_BUDGET_SEC)
 
-    if labelX ~= nil then
+    -- A result that arrives together with sweepCompleted belongs to the
+    -- scanner's NEXT pass (it restarts itself inside the same call): drop it.
+    if labelX ~= nil and not sweepCompleted then
         local entry = self:buildEntry(labelX, labelZ, sampleX, sampleZ, riceField, boundary)
         table.insert(self.pendingEntries, entry)
         log(string.format("[WailaFieldIndex] Field found: wailaFieldId=%d area=%.0fm^2 boundaryPoints=%d label=(%.1f, %.1f)",
@@ -640,6 +656,29 @@ function WailaFieldIndex:loadFromXML()
 
     self.entries = entries
     self.needsInitialRefresh = #entries > 0
+    self.cacheTrusted = WailaFieldIndex.isCacheUsable(entries)
+end
+
+-- A saved field list stands in for the startup sweep only when it is
+-- complete: every entry has its traced boundary, and no two entries share a
+-- sample point (older versions saved the same hole/field many times; such a
+-- file gets one fresh sweep, which then saves a clean one).
+function WailaFieldIndex.isCacheUsable(entries)
+    if #entries == 0 then
+        return false
+    end
+    local seen = {}
+    for _, entry in ipairs(entries) do
+        if entry.boundary == nil or entry.sampleX == nil or entry.sampleZ == nil then
+            return false
+        end
+        local key = string.format("%.1f_%.1f", entry.sampleX, entry.sampleZ)
+        if seen[key] then
+            return false
+        end
+        seen[key] = true
+    end
+    return true
 end
 
 function WailaFieldIndex:update(dt)
@@ -670,8 +709,24 @@ function WailaFieldIndex:update(dt)
         self.scanner = WailaFieldGridScanner.new()
         log(string.format("[WailaFieldIndex] Scanner created: terrainSize=%s cols=%s terrainDetailMapSize=%s",
             tostring(g_currentMission.terrainSize), tostring(self.scanner.cols), tostring(g_currentMission.terrainDetailMapSize)))
-        self:startFullSweep()
+        if self.cacheTrusted then
+            -- Fields do not move: the saved list is the answer. Later
+            -- sweeps (growth period, vehicle leaving a field) keep it fresh.
+            self.hasCompletedSweep = true
+            log(string.format("[WailaFieldIndex] Using saved field list (%d entries), startup sweep skipped", #self.entries))
+        else
+            -- wait out the loading-screen warmup before the first sweep
+            self.startupSweepDelayMs = WailaFieldIndex.STARTUP_SWEEP_DELAY_MS
+        end
         return
+    end
+
+    if self.startupSweepDelayMs ~= nil then
+        self.startupSweepDelayMs = self.startupSweepDelayMs - dt
+        if self.startupSweepDelayMs <= 0 then
+            self.startupSweepDelayMs = nil
+            self:startFullSweep()
+        end
     end
 
     if self.needsInitialRefresh then

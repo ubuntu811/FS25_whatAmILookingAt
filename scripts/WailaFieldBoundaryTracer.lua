@@ -99,6 +99,12 @@ function WailaFieldBoundaryTracer:update(frameBudget)
                 self.curZ = self.curZ + terrainDetailResolution
             else
                 table.insert(self.boundaryPositions, { self.curX, self.curZ })
+                if self.stopAfterSeek then
+                    -- the scanner wants to look at the start point (known
+                    -- hole?) before the outline is paid for; still budgeted
+                    self.stopAfterSeek = false
+                    return true
+                end
             end
         else
             local numPositions = #self.boundaryPositions
