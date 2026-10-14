@@ -365,11 +365,19 @@ end
 -- Real finding (placeable probe on the cement factory): the walls' rigid-body boxes
 -- are far bigger than the building, but a downward ray lands on the roof and the
 -- BUILDING hits trace the true, stepped outline. Measured: 3,581 rays in 5ms.
+-- Real finding (Estancia Lapacho harbour): buildings baked into the map file
+-- (node silosLOD) are group STATIC_OBJECT | PLACEMENT_BLOCKING with no BUILDING bit,
+-- so the same ray also accepts STATIC_OBJECT hits. Statics are also fences, poles
+-- and props: those need to be tall, and are only kept where the footprint is thick
+-- (an opening removes anything 4 m wide or less) and large.
 WailaTrailTracer.BUILDING_CELL_SIZE = 2.0
 WailaTrailTracer.BUILDING_RAY_START_ABOVE = 60
 WailaTrailTracer.BUILDING_MIN_HEIGHT = 1.5
 WailaTrailTracer.BUILDING_MIN_CELLS = 4
 WailaTrailTracer.BUILDING_MIN_HOLE_CELLS = 16
+WailaTrailTracer.STATIC_MIN_HEIGHT = 2.5
+WailaTrailTracer.STATIC_OPEN_RADIUS = 1
+WailaTrailTracer.STATIC_MIN_CELLS = 12
 
 local buildingRayTarget = {}
 function buildingRayTarget:onBuildingRayCallback(hitObjectId, x, y)
@@ -385,23 +393,54 @@ function WailaTrailTracer.scanBuildingChunk(minX, minZ, chunkSize)
     local n = math.floor(chunkSize / cell)
     local above = WailaTrailTracer.BUILDING_RAY_START_ABOVE
     local minHeight = WailaTrailTracer.BUILDING_MIN_HEIGHT
-    local mask, count = {}, 0
+    local staticMinHeight = WailaTrailTracer.STATIC_MIN_HEIGHT
+    local rayMask = bit32.bor(CollisionFlag.BUILDING, CollisionFlag.STATIC_OBJECT)
+    local mask, staticMask, count, staticCount = {}, {}, 0, 0
     for row = 0, n - 1 do
-        local line = {}
+        local line, staticLine = {}, {}
         local z = minZ + (row + 0.5) * cell
         for col = 0, n - 1 do
             local x = minX + (col + 0.5) * cell
             local terrainY = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z)
             buildingRayTarget.hitNode, buildingRayTarget.hitY = nil, nil
-            raycastClosest(x, terrainY + above, z, 0, -1, 0, above + 5, "onBuildingRayCallback", buildingRayTarget, CollisionFlag.BUILDING)
-            local hit = buildingRayTarget.hitNode ~= nil and buildingRayTarget.hitY > terrainY + minHeight
+            raycastClosest(x, terrainY + above, z, 0, -1, 0, above + 5, "onBuildingRayCallback", buildingRayTarget, rayMask)
+            local hit, staticHit = false, false
+            local node = buildingRayTarget.hitNode
+            if node ~= nil then
+                local height = buildingRayTarget.hitY - terrainY
+                if height > minHeight and CollisionFlag.getHasGroupFlagSet(node, CollisionFlag.BUILDING) then
+                    hit = true
+                elseif height > staticMinHeight then
+                    staticHit = true
+                end
+            end
             line[col] = hit
+            staticLine[col] = staticHit
             if hit then
                 count = count + 1
             end
+            if staticHit then
+                staticCount = staticCount + 1
+            end
         end
         mask[row] = line
+        staticMask[row] = staticLine
     end
+
+    if staticCount > 0 then
+        local radius = WailaTrailTracer.STATIC_OPEN_RADIUS
+        staticMask = dilateMask(erodeMask(staticMask, n, radius), n, radius)
+        WailaTrailTracer.cleanComponents(staticMask, noProtectedRows, n, WailaTrailTracer.STATIC_MIN_CELLS, 0)
+        for row = 0, n - 1 do
+            for col = 0, n - 1 do
+                if staticMask[row][col] and not mask[row][col] then
+                    mask[row][col] = true
+                    count = count + 1
+                end
+            end
+        end
+    end
+
     if count == 0 then
         return {}
     end
