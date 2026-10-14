@@ -56,14 +56,13 @@ local SPLIT_MATERIALS = { MATERIAL_DIRT, MATERIAL_GRAVEL, MATERIAL_STONE }
 -- to represent (0=empty plus 3 real materials), unlike the old single-
 -- material version's plain 1-bit "is this filled" value.
 local MATERIAL_VALUE = { [MATERIAL_DIRT] = 1, [MATERIAL_GRAVEL] = 2, [MATERIAL_STONE] = 3 }
--- Real request ("so they'd go green instead of white, because forests on
--- these maps happen to have stone underneath at times"): STONE gets its
--- own distinct green, separate from dirt/gravel's gray family -- the
--- whole point of splitting by material at all.
+-- Trails are one subtle dark gray (drawn at about half opacity by TaskMap), the
+-- same in every material slot: the scan stores trails under the gravel slot, and
+-- old saves may still hold the other two.
 local MATERIAL_COLOR = {
-    [MATERIAL_DIRT] = { 0.5, 0.5, 0.5 },
-    [MATERIAL_GRAVEL] = { 0.6, 0.55, 0.45 },
-    [MATERIAL_STONE] = { 0.2, 0.5, 0.2 },
+    [MATERIAL_DIRT] = { 0.15, 0.15, 0.15 },
+    [MATERIAL_GRAVEL] = { 0.15, 0.15, 0.15 },
+    [MATERIAL_STONE] = { 0.15, 0.15, 0.15 },
 }
 -- Debug colour mode (debug hub toggle): every layer gets a loud, distinct
 -- colour so overlays can be told apart at a glance. Normal colours stay
