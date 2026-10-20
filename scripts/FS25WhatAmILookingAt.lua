@@ -87,6 +87,10 @@ function FS25WhatAmILookingAt:setupComponents()
 
     self.areaTracker = WailaAreaTracker.new()
 
+    -- Per-savegame look of the map layers (colours, opacity, visibility); must
+    -- be loaded before the tracer restores/draws its overlays below.
+    WailaMapSettings.load()
+
     -- Real GUI screen registration -- g_gui:loadGui(xmlPath, name,
     -- controllerInstance) pairs the layout XML with its Lua controller
     -- under a string name, opened later via g_gui:showDialog(name) (see
@@ -134,12 +138,14 @@ function FS25WhatAmILookingAt:setupComponents()
             label = label,
             icon = Utils.getFilename("gui/icons/" .. id .. ".dds", FS25WhatAmILookingAt.MOD_DIRECTORY),
             getItems = function() return entries end,
-            describeItem = function(item) return item.label, nil end,
+            describeItem = function(item) return item.getLabel ~= nil and item.getLabel() or item.label, nil end,
             buttons = { { label = "Run", callback = function(item) item.run() end } },
         })
     end
 
     registerActionTab("general", "General", {
+        { getLabel = function() return "Debug logging (all WAILA-aware mods): " .. (WailaConfig.isDebugLog() and "ON" or "OFF") .. " - run to switch" end,
+          run = function() WailaConfig.toggleDebugLog() end },
         { label = "Dump inspected target", run = function() mod:onDumpTarget() end },
         { label = "Dump environment/weather state", run = function() mod:onDumpEnvironment() end },
         { label = "Dump player + held hand tool position", run = function() mod:onDumpPlayerAndHandTool() end },
@@ -152,7 +158,8 @@ function FS25WhatAmILookingAt:setupComponents()
 
     registerActionTab("terrain", "Terrain", {
         { label = "Dump terrain layers", run = function() mod:onDumpTerrainLayers() end },
-        { label = "Build tree/water overlay near player", run = function() mod:onBuildFeatureOverlay() end },
+        { label = "Rescan around me (3 x 3 chunks, 192 m) - same layers and colours as Shift+G", run = function() mod:onRescanAroundMe() end },
+        { label = "Count tree trunks at crosshair (the forest scan's own query)", run = function() mod:onTreeProbe() end },
         { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
         { label = "Build layer-class overlay near player (road orange, forest green)", run = function() mod:onBuildLayerClassOverlay() end },
         { label = "TOGGLE overlay debug colours (loud, distinct per layer)", run = function() WailaTrailTracer.toggleDebugColors() end },
@@ -212,6 +219,9 @@ function FS25WhatAmILookingAt:setupComponents()
             Waila.unregisterArea(area)
         end } },
     })
+
+    -- Map layers tab: colour / opacity / visibility per layer, see WailaMapLayersTab.lua
+    WailaMapLayersTab.register()
 
     -- Published via g_currentMission, not the bare Waila global -- a
     -- mod's own declared globals aren't actually visible to OTHER mods'
@@ -292,6 +302,8 @@ end
 -- WailaAreaIndex:clear() already existed for exactly this - reused, not
 -- reinvented.
 function FS25WhatAmILookingAt:teardownComponents()
+    -- quitting right after a save: let the layer save finish its file before the map goes away
+    WailaTrailTracer.flushPendingIO()
     g_inputBinding:removeActionEventsByTarget(self)
     g_messageCenter:unsubscribeAll(self)
     if self.fieldIndex ~= nil then
@@ -313,7 +325,7 @@ function FS25WhatAmILookingAt:teardownComponents()
             index:clear()
         end
     end
-    for _, id in ipairs({ "general", "terrain", "foliage", "field", "areas" }) do
+    for _, id in ipairs({ "general", "terrain", "foliage", "field", "areas", "maplayers" }) do
         Waila.unregisterDebugTab(id)
     end
     if self.debugHubGui ~= nil then
@@ -365,9 +377,9 @@ function FS25WhatAmILookingAt:onVehicleLeftField(vehicleOrPlayer, entry)
     end
 
     if entry == nil then
-        log("[FieldIndex self-test] %s left field ground (no longer field)", entityName)
+        WailaConfig.debug("[FieldIndex self-test] %s left field ground (no longer field)", entityName)
     else
-        log("[FieldIndex self-test] %s left field #%d", entityName, entry.wailaFieldId)
+        WailaConfig.debug("[FieldIndex self-test] %s left field #%d", entityName, entry.wailaFieldId)
     end
 end
 
@@ -380,11 +392,11 @@ end
 -- action button (Waila.resolveAreaField(area, "actionCallback"), same
 -- resolution, reachable there without needing to stand in the area).
 function FS25WhatAmILookingAt:onAreaEntered(typeName, area)
-    log("[AreaTracker self-test] player entered area '%s'", typeName)
+    WailaConfig.debug("[AreaTracker self-test] player entered area '%s'", typeName)
 end
 
 function FS25WhatAmILookingAt:onAreaLeft(typeName, area)
-    log("[AreaTracker self-test] player left area '%s'", typeName)
+    WailaConfig.debug("[AreaTracker self-test] player left area '%s'", typeName)
 end
 
 function FS25WhatAmILookingAt:registerActionEvents()
@@ -479,16 +491,28 @@ function FS25WhatAmILookingAt:onBuildLayerClassOverlay()
     WailaTrailTracer.buildLayerClassOverlay(x, z)
 end
 
-function FS25WhatAmILookingAt:onBuildFeatureOverlay()
+function FS25WhatAmILookingAt:onTreeProbe()
     if self.current == nil or self.current.hit == nil then
-        log("[FeatureOverlay] No current terrain target")
+        log("[TreeProbe] No current target: aim at a tree first")
         return
     end
+    WailaTrailTracer.logTreeProbe(self.current.hit.x, self.current.hit.z)
+end
 
-    local success, cellCount, treeCount, waterCount, elapsedMs = WailaTrailTracer.buildFeatureOverlay(self.current.hit.x, self.current.hit.z)
-    if success then
-        log("[FeatureOverlay] %d cell(s), %d tree polygon(s), %d water polygon(s), %.0fms", cellCount, treeCount, waterCount, elapsedMs)
+-- The player's own position (not the crosshair target): the area rescan is "the ground I am standing on".
+function FS25WhatAmILookingAt:onRescanAroundMe()
+    local x, z
+    if g_localPlayer ~= nil and g_localPlayer.getPosition ~= nil then
+        local px, _, pz = g_localPlayer:getPosition()
+        x, z = px, pz
+    elseif self.current ~= nil and self.current.hit ~= nil then
+        x, z = self.current.hit.x, self.current.hit.z
     end
+    if x == nil then
+        log("[AreaScan] no player position")
+        return
+    end
+    WailaTrailTracer.startAreaScan(x, z)
 end
 
 -- Writes waila.xml on demand (not waiting for a real savegame save) --
@@ -546,6 +570,7 @@ function FS25WhatAmILookingAt:update(dt)
     -- startSaveToXML/startLoadFromXML's own headers for why this can't
     -- just be one synchronous call.
     WailaTrailTracer.tickSaveToXML()
+    WailaTrailTracer.tickImageSave()
     WailaTrailTracer.tickLoadFromXML()
 
     -- Same toggle as the field-boundary overlay below -- one switch for
@@ -744,6 +769,12 @@ local function onSavegameControllerSaveComplete(self, errorCode)
         FS25WhatAmILookingAt.fieldIndex:saveToXML()
     end
     if errorCode == Savegame.ERROR_OK then
+        -- The game's save clears files it does not write itself (found live: the map
+        -- layer settings, written only when you change something, vanished from the
+        -- savegame folder after the next save), so write them again on every save.
+        if WailaMapSettings ~= nil then
+            WailaMapSettings.save()
+        end
         WailaTrailTracer.startSaveToXML()
     end
 end

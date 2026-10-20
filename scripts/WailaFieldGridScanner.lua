@@ -61,6 +61,9 @@ function WailaFieldGridScanner:reset()
     self.rows = self.cols
     self.claimed = {}
     self.holes = {}
+    -- progress counters for the on-screen field sweep line
+    self.tracesStarted = 0
+    self.holeSeedsSkipped = 0
     self.sweepIndex = 0
     self.activeTracer = nil
     self.activeSeedCol = nil
@@ -245,6 +248,7 @@ function WailaFieldGridScanner:update(timeBudgetSec)
                     if isNearPolygon(hole, edge[1], edge[2], tolerance) then
                         self:markClaimed(self.activeSeedCol, self.activeSeedRow)
                         self.activeTracer = nil
+                        self.holeSeedsSkipped = self.holeSeedsSkipped + 1
                         dropped = true
                         break
                     end
@@ -326,6 +330,7 @@ function WailaFieldGridScanner:update(timeBudgetSec)
                     else
                         -- ask update() to stop once the walk to the field edge is
                         -- done, so the start point can be checked against known holes
+                        self.tracesStarted = self.tracesStarted + 1
                         self.activeTracer.stopAfterSeek = true
                         self.activeEdgeChecked = false
                         self.activeSeedCol, self.activeSeedRow = col, row
@@ -353,8 +358,27 @@ end
 -- made: safe because it's bounded to one field, not the whole map) --
 -- native-resolution tracing is finer-grained than the old grid flood-fill
 -- was, so a very large field may take noticeably longer than before did.
+-- Budgeted variant for single-field rescans: beginBlobScan hands back a
+-- tracer (nil if (x, z) is not field ground), the caller advances it with
+-- tracer:update(budget) a few ms per tick and calls finishBlobScan when
+-- update returns false.
+function WailaFieldGridScanner:beginBlobScan(x, z)
+    return WailaFieldBoundaryTracer.new(x, z)
+end
+
+function WailaFieldGridScanner:finishBlobScan(tracer, x, z)
+    local polygon = tracer:toPolygon()
+    local areaSqm = polygon:getArea()
+    local labelX, labelZ = computeInteriorPoint(polygon, x, z)
+    local riceField = self:getRiceFieldAt(x, z)
+
+    return labelX, labelZ, labelX, labelZ, areaSqm, riceField, polygon
+end
+
+-- Synchronous (whole field in one call): only for the rare startup repair of
+-- a cache entry that has no boundary. Live rescans use beginBlobScan.
 function WailaFieldGridScanner:scanBlobAt(x, z)
-    local tracer = WailaFieldBoundaryTracer.new(x, z)
+    local tracer = self:beginBlobScan(x, z)
     if tracer == nil then
         return nil
     end
@@ -363,10 +387,5 @@ function WailaFieldGridScanner:scanBlobAt(x, z)
         -- keep advancing in reasonably-sized slices until finalize() runs
     end
 
-    local polygon = tracer:toPolygon()
-    local areaSqm = polygon:getArea()
-    local labelX, labelZ = computeInteriorPoint(polygon, x, z)
-    local riceField = self:getRiceFieldAt(x, z)
-
-    return labelX, labelZ, labelX, labelZ, areaSqm, riceField, polygon
+    return self:finishBlobScan(tracer, x, z)
 end

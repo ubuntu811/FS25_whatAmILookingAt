@@ -51,6 +51,12 @@ Waila.events = {
 -- occasional-use diagnostics, not something that should run by default.
 Waila.debugFieldTracing = false
 
+-- One switch for chatty debug logging across WAILA and every mod that asks
+-- (other mods call g_currentMission.waila.isDebugLogEnabled(); see WailaConfig.lua).
+function Waila.isDebugLogEnabled()
+    return WailaConfig.isDebugLog()
+end
+
 -- Monotonic within this process, combined with getTimeSec() (real,
 -- already used elsewhere in this codebase, e.g. FS25WhatAmILookingAt's
 -- own scan timing) so ids stay unique even across separate game

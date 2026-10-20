@@ -49,6 +49,8 @@ local DONE_DISPLAY_MS = 2000
 
 function WailaDebugHubDialog.new(customMt)
     local self = ScreenElement.new(nil, customMt or WailaDebugHubDialog_mt)
+    -- tabs that change what they list (Map layers) ask the open hub to refresh
+    WailaDebugHubDialog.instance = self
     self.tabs = {}
     self.activeTabIndex = 1
     self.items = {}
@@ -137,7 +139,9 @@ function WailaDebugHubDialog:setActiveTab(index)
     self:refreshItems()
 end
 
-function WailaDebugHubDialog:refreshItems()
+-- keepIndex (optional): re-select that row after the reload, so a tab that
+-- edits the selected item (Map layers: opacity steps) does not jump back to row 1.
+function WailaDebugHubDialog:refreshItems(keepIndex)
     self.selectedItem = nil
     local tab = self:getActiveTab()
     self.items = (tab ~= nil and tab.getItems()) or {}
@@ -145,6 +149,9 @@ function WailaDebugHubDialog:refreshItems()
     self.isRefreshingItems = true
     self.itemList:setDataSource(self)
     self.itemList:reloadData(true)
+    if keepIndex ~= nil and keepIndex > 1 and keepIndex <= #self.items then
+        pcall(self.itemList.setSelectedIndex, self.itemList, keepIndex, true)
+    end
     self.isRefreshingItems = false
 
     self:updateActionButtons()
@@ -207,6 +214,52 @@ function WailaDebugHubDialog:populateCellForItemInSection(list, section, index, 
     end
     cell:getAttribute("primary"):setText(primary or "")
     cell:getAttribute("secondary"):setText(secondary or "")
+
+    -- optional colour chip: tab.getItemColor(item) -> r, g, b (linear), alpha (default 1)
+    local swatch = cell:getAttribute("swatch")
+    if swatch ~= nil then
+        local r, g, b, a
+        if tab ~= nil and item ~= nil and tab.getItemColor ~= nil then
+            r, g, b, a = tab.getItemColor(item)
+        end
+        swatch:setVisible(r ~= nil)
+        if r ~= nil then
+            a = a or 1
+            swatch:setImageColor(nil, r, g, b, a)
+            swatch:setImageColor(GuiOverlay.STATE_SELECTED, r, g, b, a)
+        end
+    end
+end
+
+-- Mouse wheel over a row of a tab that defines onScroll(item, delta) (Map layers: opacity):
+-- wheel up = +1, down = -1, applied to the HOVERED row. Caught before the list sees it,
+-- because the list would use the same wheel to scroll / move the selection.
+function WailaDebugHubDialog:mouseEvent(posX, posY, isDown, isUp, button, eventUsed)
+    if isDown and not eventUsed and self.itemList ~= nil then
+        local delta = 0
+        if Input.isMouseButtonPressed(Input.MOUSE_BUTTON_WHEEL_UP) then
+            delta = 1
+        elseif Input.isMouseButtonPressed(Input.MOUSE_BUTTON_WHEEL_DOWN) then
+            delta = -1
+        end
+        local tab = self:getActiveTab()
+        local list = self.itemList
+        if delta ~= 0 and tab ~= nil and tab.onScroll ~= nil
+            and GuiUtils.checkOverlayOverlap(posX, posY, list.absPosition[1], list.absPosition[2], list.absSize[1], list.absSize[2]) then
+            local over = list:getElementAtScreenPosition(posX, posY)
+            local index = over ~= nil and over.indexInSection or nil
+            local item = index ~= nil and self.items[index] or nil
+            if item ~= nil then
+                local ok, err = pcall(tab.onScroll, item, delta)
+                if not ok then
+                    log("scroll on '%s' FAILED: %s", tostring(tab.id), tostring(err))
+                end
+                self:refreshItems(index)
+                return true
+            end
+        end
+    end
+    return WailaDebugHubDialog:superClass().mouseEvent(self, posX, posY, isDown, isUp, button, eventUsed)
 end
 
 function WailaDebugHubDialog:onListSelectionChanged(list, section, index)
@@ -244,6 +297,7 @@ local function runAction(self, index)
         return
     end
 
+    local keepIndex = self.itemList ~= nil and self.itemList.selectedIndex or nil
     local ok, err = pcall(descriptor.callback, self.selectedItem)
     if not ok then
         log("click action %d: '%s' callback FAILED: %s", index, tostring(descriptor.label), tostring(err))
@@ -251,7 +305,7 @@ local function runAction(self, index)
 
     self.doneActionIndex = index
     self.doneActionUntil = DONE_DISPLAY_MS
-    self:refreshItems()
+    self:refreshItems(keepIndex)
 end
 
 function WailaDebugHubDialog:onClickAction1() runAction(self, 1) end

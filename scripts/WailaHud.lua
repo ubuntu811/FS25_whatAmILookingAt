@@ -127,6 +127,161 @@ function WailaHud:getMiniSummary(inspection)
     return "Unknown"
 end
 
+-- ===== Background task strip =====
+-- Rows for the strip under the mini panel: { label, fraction (nil = no bar) } for every
+-- long-running WAILA job that is active right now (map scan, field sweep, restoring or
+-- saving the scanned layers). Pure data in, rows out; drawn by drawMini.
+function WailaHud.formatCount(n)
+    n = n or 0
+    if n >= 10000 then
+        return string.format("%.1fk", n / 1000)
+    end
+    return tostring(math.floor(n))
+end
+
+function WailaHud.collectTaskRows(tracer, fieldIndex)
+    local rows = {}
+    local function add(label, done, total, detail)
+        table.insert(rows, {
+            label = label,
+            fraction = total ~= nil and total > 0 and math.min(1, done / total) or nil,
+            detail = detail,
+        })
+    end
+    local count = WailaHud.formatCount
+
+    local scan = tracer ~= nil and tracer.wholeMapScanState or nil
+    if scan ~= nil then
+        local total = scan.chunksTotal or (scan.chunksPerSide * scan.chunksPerSide)
+        local done = scan.chunksDone or (scan.row * scan.chunksPerSide + scan.col)
+        local stats = scan.stats
+        local detail = nil
+        if stats ~= nil then
+            -- what the scan has found so far, two short lines
+            detail = {
+                string.format("trees %s  forest %s", count(stats.trees), count(stats.forestPolygons)),
+                string.format("trails %s  roads %s", count(stats.trailPolygons), count(stats.roadPolygons)),
+                string.format("buildings %s  water %s", count(stats.buildingPolygons), count(stats.waterPolygons)),
+            }
+        end
+        add(scan.isArea and "Area scan" or "Map scan", done, total, detail)
+    end
+
+    if fieldIndex ~= nil and fieldIndex.getSweepProgress ~= nil then
+        local progress = fieldIndex:getSweepProgress()
+        if progress ~= nil and not progress.finished then
+            if progress.waiting then
+                add(string.format("Fields in %ds", math.ceil(progress.delaySec)), 0, nil)
+            else
+                add("Field sweep", progress.done, progress.total, { string.format("%s fields found", count(progress.found)) })
+            end
+        end
+    end
+
+    -- single-field rescans (a vehicle or the player left a field): short, no known total
+    if fieldIndex ~= nil and (fieldIndex.activeBlob ~= nil or (fieldIndex.blobQueue ~= nil and #fieldIndex.blobQueue > 0)) then
+        local waiting = fieldIndex.blobQueue ~= nil and #fieldIndex.blobQueue or 0
+        add("Field rescan", 0, nil, waiting > 0 and { string.format("%d more waiting", waiting) } or nil)
+    end
+
+    local load = tracer ~= nil and tracer.loadState or nil
+    if load ~= nil then
+        local wait = load.notBefore ~= nil and load.notBefore - getTimeSec() or 0
+        if load.phase == "images" and load.images ~= nil then
+            add("Restore images", load.images.index - 1, #load.images.queue)
+        elseif wait > 0 then
+            add(string.format("Restore in %ds", math.ceil(wait)), 0, nil)
+        else
+            add("Restore", load.index, #load.workItems, { string.format("%s polygons", count(#load.workItems)) })
+        end
+    end
+    local save = tracer ~= nil and tracer.saveState or nil
+    if save ~= nil then
+        add("Save", save.index, #save.workItems, { string.format("%s polygons", count(#save.workItems)) })
+    end
+    local imageSave = tracer ~= nil and tracer.imageSaveState or nil
+    if imageSave ~= nil then
+        add("Save images", imageSave.index - 1, #imageSave.queue)
+    end
+    local note = tracer ~= nil and tracer.statusNote or nil
+    if note ~= nil and getTimeSec() < note.untilTime then
+        add(note.text, 0, nil)
+    end
+    return rows
+end
+
+WailaHud.TASK_ROW_HEIGHT = 0.021
+WailaHud.TASK_DETAIL_HEIGHT = 0.0115
+WailaHud.TASK_TEXT_SIZE = 0.0115
+WailaHud.TASK_DETAIL_SIZE = 0.0095
+WailaHud.TASK_DETAIL_WIDTH = 0.125
+
+function WailaHud.taskRowHeight(row)
+    return WailaHud.TASK_ROW_HEIGHT + (row.detail ~= nil and #row.detail or 0) * WailaHud.TASK_DETAIL_HEIGHT
+end
+
+-- Total height of the strip for these rows (0 when there are none); drawMini reserves exactly this
+-- so the docked full panel starts below it.
+function WailaHud.taskStripHeight(rows)
+    if #rows == 0 then
+        return 0
+    end
+    local height = 0.003
+    for _, row in ipairs(rows) do
+        height = height + WailaHud.taskRowHeight(row)
+    end
+    return height
+end
+
+-- The strip is as wide as the mini panel, wider while a row has detail lines to show.
+function WailaHud:taskStripWidth(rows)
+    for _, row in ipairs(rows) do
+        if row.detail ~= nil then
+            return math.max(self.miniWidth, WailaHud.TASK_DETAIL_WIDTH)
+        end
+    end
+    return self.miniWidth
+end
+
+-- Draws the strip directly under the mini panel and returns its height (0 when idle).
+function WailaHud:drawTaskRows(rows, left, top)
+    if #rows == 0 or drawFilledRect == nil then
+        return 0
+    end
+    local height = WailaHud.taskStripHeight(rows)
+    local width = self:taskStripWidth(rows)
+    drawFilledRect(left, top - height, width, height, 0, 0, 0, 0.65)
+
+    local textLeft = left + 0.008
+    local barWidth = width - 0.016
+    local rowTop = top - 0.003
+    for _, row in ipairs(rows) do
+        local baseline = rowTop - 0.0125
+        setTextColor(0.85, 0.85, 0.85, 1)
+        setTextAlignment(RenderText.ALIGN_LEFT)
+        renderText(textLeft, baseline, WailaHud.TASK_TEXT_SIZE, row.label)
+        if row.fraction ~= nil then
+            setTextAlignment(RenderText.ALIGN_RIGHT)
+            renderText(textLeft + barWidth, baseline, WailaHud.TASK_TEXT_SIZE, string.format("%.0f%%", row.fraction * 100))
+        end
+        local y = rowTop - 0.0155
+        if row.fraction ~= nil then
+            drawFilledRect(textLeft, y - 0.0025, barWidth, 0.0025, 0.3, 0.3, 0.3, 0.8)
+            drawFilledRect(textLeft, y - 0.0025, barWidth * row.fraction, 0.0025, 0.35, 0.75, 0.35, 1)
+        end
+        if row.detail ~= nil then
+            setTextColor(0.62, 0.62, 0.62, 1)
+            setTextAlignment(RenderText.ALIGN_LEFT)
+            for i, line in ipairs(row.detail) do
+                renderText(textLeft, y - 0.006 - i * WailaHud.TASK_DETAIL_HEIGHT + 0.003, WailaHud.TASK_DETAIL_SIZE, line)
+            end
+        end
+        rowTop = rowTop - WailaHud.taskRowHeight(row)
+    end
+    setTextAlignment(RenderText.ALIGN_LEFT)
+    return height
+end
+
 function WailaHud:drawMini(inspection, perf)
     if drawFilledRect == nil then
         return
@@ -143,10 +298,16 @@ function WailaHud:drawMini(inspection, perf)
     -- g_currentMission, which genuinely is shared engine-side state that
     -- exists before any mod runs. Full detailed panel below docks off
     -- these too, not off IW - mini panel is the real anchor for this row.
+    -- Long-running jobs (scans, restore, save) get a strip right under the panel; the
+    -- exported bottom includes it so the docked full panel starts below the strip.
+    local tracer = g_currentMission ~= nil and g_currentMission.wailaTrailTracer or nil
+    local rows = WailaHud.collectTaskRows(tracer, Waila.indices.field)
+    local stripHeight = WailaHud.taskStripHeight(rows)
+
     if g_currentMission ~= nil then
         g_currentMission.wailaHudMiniLeft = left
         g_currentMission.wailaHudMiniRight = left + self.miniWidth
-        g_currentMission.wailaHudMiniBottom = panelBottom
+        g_currentMission.wailaHudMiniBottom = panelBottom - stripHeight
     end
 
     drawFilledRect(left, panelBottom, self.miniWidth, self.miniHeight, 0, 0, 0, 0.65)
@@ -196,6 +357,42 @@ function WailaHud:drawMini(inspection, perf)
     renderText(textLeft, panelBottom + 0.018, self.miniValueSize, summary)
 
     setTextAlignment(RenderText.ALIGN_LEFT)
+
+    self:drawTaskRows(rows, left, panelBottom)
+end
+
+-- Trunks near the inspected point, from the same overlap query the forest scan uses. The HUD
+-- draws every frame, so the answer is cached per metre of position and refreshed at most
+-- four times a second.
+-- Share of the sampled area carrying forest-family foliage (forestPlants, forestGrass: the base
+-- game's undergrowth layers, named per family, "forestPlants L2" per growth level) -- a second
+-- forest signal that does not depend on tree colliders. rows: foliageArea.foliage ({name, percent}).
+WailaHud.FOREST_FOLIAGE_MIN_PERCENT = 40
+function WailaHud.forestFoliagePercent(rows)
+    local total = 0
+    for _, row in ipairs(rows or {}) do
+        if type(row.name) == "string" and row.name:find("^forest") then
+            total = total + row.percent
+        end
+    end
+    return total
+end
+
+WailaHud.TREE_EVIDENCE_RADIUS = 8
+WailaHud.TREE_FOREST_MIN_TRUNKS = 3
+function WailaHud:getTreeEvidence(x, z)
+    if overlapBox == nil or WailaTrailTracer == nil or WailaTrailTracer.countTrees == nil then
+        return nil
+    end
+    local now = getTimeSec()
+    local key = string.format("%d_%d", math.floor(x), math.floor(z))
+    local cache = self.treeEvidence
+    if cache ~= nil and cache.key == key and now - cache.time < 0.25 then
+        return cache.count
+    end
+    local count = WailaTrailTracer.countTrees(x, z, WailaHud.TREE_EVIDENCE_RADIUS)
+    self.treeEvidence = { key = key, time = now, count = count }
+    return count
 end
 
 function WailaHud:drawLines(lines)
@@ -284,19 +481,6 @@ function WailaHud:draw(inspection, areaSize, areaStep)
             weather.rainScale, weather.timeSinceLastRain, weather.temperature
         ))
         self:addLine(lines, string.format("isRaining=%s (rainScale>0.1 and timeSinceLastRain<30 and temp>0)", WailaUtil.bool(weather.isRaining)))
-    end
-
-    -- Global state, same reasoning as Weather above -- only shown while a
-    -- sweep is actually running (isSweeping), not a permanent fixture.
-    -- Reads Waila.indices.field directly (same-mod access, no
-    -- g_currentMission indirection needed -- that's only required for
-    -- OTHER mods reading this) rather than threading sweep state through
-    -- draw()'s own parameters.
-    do
-        local fieldIndex = Waila.indices.field
-        if fieldIndex ~= nil and fieldIndex.isSweeping and fieldIndex.scanner ~= nil then
-            self:addLine(lines, string.format("Field sweep: row %d/%d", (fieldIndex.scanner.lastLoggedRow or 0) + 1, fieldIndex.scanner.rows), true, true)
-        end
     end
 
     if inspection == nil or inspection.hit == nil then
@@ -645,10 +829,22 @@ function WailaHud:draw(inspection, areaSize, areaStep)
                 self:addLine(lines, string.format("Learned classes: road %.0f%%  forest floor %.0f%%", roadPercent, forestPercent))
             end
 
+            -- trunks around the point: a forest floor reads as grass on the ground alone
+            -- (grass material, forest-plant foliage), so the trees decide
+            local forestFoliage = WailaHud.forestFoliagePercent(inspection.foliageArea ~= nil and inspection.foliageArea.foliage or nil)
+            local trunks = self:getTreeEvidence(inspection.hit.x, inspection.hit.z)
+            if trunks ~= nil then
+                self:addLine(lines, string.format("Trees: %d trunk(s) within %dm", trunks, WailaHud.TREE_EVIDENCE_RADIUS))
+            end
+
             if inspection.terrainArea.fieldPercent > 50 then
                 verdict = "field"
             elseif WailaTrailTracer.layerClassLearned and roadPercent >= 60 then
                 verdict = string.format("ROAD (learned layer, %.0f%%)", roadPercent)
+            elseif trunks ~= nil and trunks >= WailaHud.TREE_FOREST_MIN_TRUNKS
+                and not (WailaTrailTracer.layerClassLearned and forestPercent >= 60) then
+                verdict = string.format("FOREST (%d trunks within %dm; the ground reads as %s)", trunks, WailaHud.TREE_EVIDENCE_RADIUS,
+                    topMaterial ~= nil and string.lower(topMaterial.name) or "mixed")
             elseif WailaTrailTracer.layerClassLearned and forestPercent >= 60 then
                 -- the forest-floor layer alone is not forest: a parking lot or a worn path
                 -- carries it too, but its foliage is empty
@@ -665,6 +861,9 @@ function WailaHud:draw(inspection, areaSize, areaStep)
                 else
                     verdict = string.format("FOREST (forest-floor layer %.0f%% + foliage)", forestPercent)
                 end
+            elseif forestFoliage >= WailaHud.FOREST_FOLIAGE_MIN_PERCENT then
+                verdict = string.format("FOREST floor (%.0f%% forest-family foliage; the ground reads as %s)", forestFoliage,
+                    topMaterial ~= nil and string.lower(topMaterial.name) or "mixed")
             elseif topMaterial ~= nil and topMaterial.name == "GRASS" and topMaterial.percent >= 60 then
                 verdict = "grass ground (meadow / verge-like)"
             elseif topMaterial ~= nil and topMaterial.percent >= 90 and topLayer ~= nil and topLayer.percent >= 90 then

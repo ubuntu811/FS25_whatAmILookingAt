@@ -45,6 +45,9 @@
             <ListItem profile="waila_hubFlatListItem">
                 <Text profile="waila_hubItemPrimary" name="primary"/>
                 <Text profile="waila_hubItemSecondary" name="secondary"/>
+                <!-- colour chip, tinted per row in Lua (setImageColor) by tabs that define
+                     getItemColor (Map layers); hidden for every other tab -->
+                <Bitmap profile="waila_hubSwatch" name="swatch"/>
             </ListItem>
         </SmoothList>
         <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
@@ -135,6 +138,12 @@
         <Profile name="waila_hubItemSecondary" extends="fs25_textDarkHighlight" with="anchorBottomRight">
             <position value="-38px 30px"/>
             <textAlignment value="right"/>
+        </Profile>
+        <Profile name="waila_hubSwatch" extends="baseReference" with="anchorTopRight">
+            <size value="52px 52px"/>
+            <position value="-38px -14px"/>
+            <imageSliceId value="gui.colorPreset"/>
+            <imageColor value="1 1 1 1"/>
         </Profile>
         <Profile name="waila_hubDetailBox" extends="emptyPanel" with="anchorStretchingYLeft">
             <size value="45% 950px"/>

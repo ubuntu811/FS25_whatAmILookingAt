@@ -16,6 +16,7 @@
 
     <extraSourceFiles>
         <sourceFile filename="scripts/WailaUtil.lua" />
+        <sourceFile filename="scripts/WailaConfig.lua" />
         <sourceFile filename="scripts/WailaRaycaster.lua" />
         <sourceFile filename="scripts/WailaJobDefinitions.lua" />
         <sourceFile filename="scripts/classes/WailaField.lua" />
@@ -33,6 +34,8 @@
         <sourceFile filename="scripts/inspectors/WailaFieldInspector.lua" />
         <sourceFile filename="scripts/WailaFieldGridScanner.lua" />
         <sourceFile filename="scripts/WailaFieldBoundaryTracer.lua" />
+        <sourceFile filename="scripts/WailaMapSettings.lua" />
+        <sourceFile filename="scripts/WailaMapLayersTab.lua" />
         <sourceFile filename="scripts/WailaTrailTracer.lua" />
         <sourceFile filename="scripts/WailaLayerScan.lua" />
         <sourceFile filename="scripts/WailaFieldIndex.lua" />

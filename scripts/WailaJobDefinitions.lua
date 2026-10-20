@@ -117,17 +117,11 @@ WailaJobDefinitions.DEFINITIONS = {
     },
 }
 
--- Meadow (player-converted pasture, or map-authored grassMissionOnly)
--- never has open field jobs, regardless of what the raw thresholds above
--- would otherwise say -- same check SmartMinimapAuto already applies
--- before drawing any letters.
+-- No blanket meadow exclusion: the field index only ever contains real fields (a pasture that
+-- is not a field never gets this far), and a field with grass sown on it that is ready to
+-- harvest, or has weeds, should get its letter like any other crop. The per-job
+-- grassMissionOnly guards above (no plowing / sowing) still apply.
 function WailaJobDefinitions.evaluate(fieldState, field)
-    local isMeadow = fieldState.groundType == FieldGroundType.GRASS
-        or fieldState.groundType == FieldGroundType.GRASS_CUT
-    if isMeadow then
-        return {}
-    end
-
     local jobs = {}
     for _, definition in ipairs(WailaJobDefinitions.DEFINITIONS) do
         if definition.check(fieldState, field) then

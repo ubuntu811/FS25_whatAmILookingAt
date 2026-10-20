@@ -65,19 +65,191 @@ WailaTrailTracer.TREE_MIN_COUNT = 1
 -- closing radius (in 2m cells) that joins the gaps between trunks into one area
 WailaTrailTracer.TREE_CLOSE_RADIUS = 2
 local TREE_BOX_HALF_HEIGHT = 25
-local treeOverlapTarget = {}
+-- the big per-chunk window query covers any elevation difference inside the window
+WailaTrailTracer.TREE_WINDOW_HALF_HEIGHT = 250
+local treeOverlapTarget = { seenNodes = nil, uniqueNodes = 0 }
 function treeOverlapTarget:onTreeOverlap(nodeId)
+    -- while collecting (collectTrees), every hit shape's position is recorded
+    if self.collect ~= nil and nodeId ~= nil and nodeId ~= 0 then
+        local x, _, z = getWorldTranslation(nodeId)
+        self.collect[#self.collect + 1] = { x, z }
+        if self.seenNodes ~= nil and not self.seenNodes[nodeId] then
+            self.seenNodes[nodeId] = true
+            self.uniqueNodes = self.uniqueNodes + 1
+        end
+    end
     return false
+end
+
+-- Same query as countTrees, but also returns the positions of the shapes it hit:
+-- count, { {x, z}, ... }, number of distinct node ids. One shape per trunk is the normal case; a tree with more than
+-- one collider is merged by position elsewhere (see dedupeTrees).
+function WailaTrailTracer.collectTrees(x, z, half, trackNodes, halfHeight)
+    if overlapBox == nil then
+        return 0, {}
+    end
+    local list = {}
+    treeOverlapTarget.collect = list
+    treeOverlapTarget.seenNodes = trackNodes and {} or nil
+    treeOverlapTarget.uniqueNodes = 0
+    local count = WailaTrailTracer.countTrees(x, z, half, halfHeight)
+    treeOverlapTarget.collect = nil
+    treeOverlapTarget.seenNodes = nil
+    return count, list, treeOverlapTarget.uniqueNodes
+end
+
+-- Trees inside the chunk [minX, minX + size) x [minZ, minZ + size) only (the query box
+-- overlaps neighbours), one per 0.5 m cell so a tree with two colliders is drawn once.
+function WailaTrailTracer.chunkTrees(list, minX, minZ, size)
+    local seen, trees = {}, {}
+    for _, p in ipairs(list) do
+        if p[1] >= minX and p[1] < minX + size and p[2] >= minZ and p[2] < minZ + size then
+            local key = math.floor(p[1] * 2) .. "_" .. math.floor(p[2] * 2)
+            if not seen[key] then
+                seen[key] = true
+                trees[#trees + 1] = p
+            end
+        end
+    end
+    return trees
+end
+
+-- Tree dots for the map: one small hexagon per tree.
+WailaTrailTracer.TREE_DOT_RADIUS = 2.5
+function WailaTrailTracer.treeDots(trees)
+    local polygons, r = {}, WailaTrailTracer.TREE_DOT_RADIUS
+    for _, t in ipairs(trees) do
+        local polygon = {}
+        for i = 0, 5 do
+            local a = i * math.pi / 3
+            polygon[#polygon + 1] = { t[1] + r * math.cos(a), t[2] + r * math.sin(a) }
+        end
+        polygons[#polygons + 1] = polygon
+    end
+    return polygons
 end
 
 -- Number of tree trunks within a box of half-size `half` around (x, z); 0 if the
 -- engine function is missing.
-function WailaTrailTracer.countTrees(x, z, half)
+-- halfHeight (optional): a tall box for big windows. The default box reaches 10 m below and 40 m above
+-- the terrain at its own centre, fine for a 4 m cell but not for an 80 m window over a slope, where trees
+-- standing lower than that were invisible; a given halfHeight is centred on the terrain itself.
+function WailaTrailTracer.countTrees(x, z, half, halfHeight)
     if overlapBox == nil then
         return 0
     end
-    local y = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z) + 15
-    return overlapBox(x, y, z, 0, 0, 0, half, TREE_BOX_HALF_HEIGHT, half, "onTreeOverlap", treeOverlapTarget, CollisionFlag.TREE, false, false, true, false) or 0
+    local y = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z) + (halfHeight and 0 or 15)
+    return overlapBox(x, y, z, 0, 0, 0, half, halfHeight or TREE_BOX_HALF_HEIGHT, half, "onTreeOverlap", treeOverlapTarget, CollisionFlag.TREE, false, false, true, false) or 0
+end
+
+--- Debug probe (Terrain tab, aimed at a tree): what the forest scan's own overlapBox query says
+--- about the spot. Logs the trunk count in the 4 m scan cell that contains (x, z) -- cells
+--- sit on a global grid from the map corner -- and in boxes of a few other sizes, and says
+--- whether the scan would mark the cell as trees. Returns the 4 m cell's count and centre.
+-- Lists what a box query finds: node id, name, and whether it is a cut-up split shape
+-- (a stump keeps the TREE bit; the base game's own tree finder skips split shapes).
+local probeTarget = { hits = {} }
+function probeTarget:onProbeOverlap(nodeId)
+    local entry = tostring(nodeId)
+    if getName ~= nil then
+        local ok, name = pcall(getName, nodeId)
+        if ok then entry = entry .. " " .. tostring(name) end
+    end
+    if getHasClassId ~= nil and ClassIds ~= nil and ClassIds.MESH_SPLIT_SHAPE ~= nil then
+        local ok, isMesh = pcall(getHasClassId, nodeId, ClassIds.MESH_SPLIT_SHAPE)
+        if ok then entry = entry .. (isMesh and " (split shape)" or " (NOT a split shape)") end
+    end
+    if getIsSplitShapeSplit ~= nil then
+        local ok, split = pcall(getIsSplitShapeSplit, nodeId)
+        if ok then entry = entry .. (split and " [split: stump or cut]" or " [intact]") end
+    end
+    table.insert(self.hits, entry)
+    return false
+end
+
+-- How many of the base game's own tracked trees (TreePlantManager: only trees planted at
+-- runtime or restored from the savegame, not the ones authored into the map) sit within
+-- `radius` of (x, z). Returns total growing, total split, and the number nearby.
+function WailaTrailTracer.countManagedTreesNear(x, z, radius)
+    local manager = g_treePlantManager
+    if manager == nil or manager.treesData == nil then
+        return nil
+    end
+    local nearby = 0
+    local function scan(list)
+        for _, tree in pairs(list or {}) do
+            if tree.node ~= nil and (entityExists == nil or entityExists(tree.node)) then
+                local tx, _, tz = getWorldTranslation(tree.node)
+                if math.abs(tx - x) <= radius and math.abs(tz - z) <= radius then
+                    nearby = nearby + 1
+                end
+            end
+        end
+    end
+    scan(manager.treesData.growingTrees)
+    scan(manager.treesData.splitTrees)
+    return #(manager.treesData.growingTrees or {}), #(manager.treesData.splitTrees or {}), nearby
+end
+
+-- Every static collider near the point, whatever its bits (the terrain excluded): node id,
+-- name, parent name, collision group. For finding out what a tree-like object that the
+-- TREE-bit query misses (a palm) really is.
+local allTarget = { hits = {} }
+function allTarget:onAllOverlap(nodeId)
+    if #self.hits >= 30 then
+        return false
+    end
+    local group = 0
+    if getCollisionFilterGroup ~= nil then
+        local ok, g = pcall(getCollisionFilterGroup, nodeId)
+        if ok and g ~= nil then group = g end
+    end
+    if group == 0x100 then
+        return false -- the terrain
+    end
+    local name, parentName = "?", "?"
+    if getName ~= nil then
+        local ok, n = pcall(getName, nodeId)
+        if ok then name = tostring(n) end
+        if getParent ~= nil then
+            local okParent, parent = pcall(getParent, nodeId)
+            if okParent and parent ~= nil and parent ~= 0 then
+                local okName, pn = pcall(getName, parent)
+                if okName then parentName = tostring(pn) end
+            end
+        end
+    end
+    table.insert(self.hits, string.format("%s %s <- %s [group 0x%X]", tostring(nodeId), name, parentName, group))
+    return false
+end
+
+function WailaTrailTracer.logTreeProbe(x, z)
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local origin = -terrainSize * 0.5
+    local cellSize = WailaTrailTracer.TREE_CELL_SIZE
+    local cx = origin + (math.floor((x - origin) / cellSize) + 0.5) * cellSize
+    local cz = origin + (math.floor((z - origin) / cellSize) + 0.5) * cellSize
+    local inCell = WailaTrailTracer.countTrees(cx, cz, cellSize * 0.5)
+    Logging.info("[WhatAmILookingAt] [LayerScan] tree probe at (%.1f, %.1f): scan cell %.0fm centred (%.1f, %.1f) holds %d trunk(s) -> %s; boxes around the point: 1m=%d 2m=%d 4m=%d 8m=%d",
+        x, z, cellSize, cx, cz, inCell, inCell >= WailaTrailTracer.TREE_MIN_COUNT and "the scan marks it as trees" or "the scan does NOT mark it",
+        WailaTrailTracer.countTrees(x, z, 1), WailaTrailTracer.countTrees(x, z, 2), WailaTrailTracer.countTrees(x, z, 4), WailaTrailTracer.countTrees(x, z, 8))
+    local growing, split, nearby = WailaTrailTracer.countManagedTreesNear(x, z, 8)
+    if growing ~= nil then
+        Logging.info("[WhatAmILookingAt] [LayerScan] tree probe TreePlantManager: %d growing + %d split trees tracked in total, %d within 8m of the point",
+            growing, split, nearby)
+    else
+        Logging.info("[WhatAmILookingAt] [LayerScan] tree probe TreePlantManager: not available")
+    end
+    if overlapBox ~= nil then
+        probeTarget.hits = {}
+        local y = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z) + 15
+        overlapBox(x, y, z, 0, 0, 0, 8, TREE_BOX_HALF_HEIGHT, 8, "onProbeOverlap", probeTarget, CollisionFlag.TREE, false, false, true, false)
+        Logging.info("[WhatAmILookingAt] [LayerScan] tree probe shapes within 8m: %s", #probeTarget.hits > 0 and table.concat(probeTarget.hits, "; ") or "none")
+        allTarget.hits = {}
+        overlapBox(x, y, z, 0, 0, 0, 8, TREE_BOX_HALF_HEIGHT, 8, "onAllOverlap", allTarget, 0xFFFFFFFF, false, false, true, false)
+        Logging.info("[WhatAmILookingAt] [LayerScan] tree probe ALL static colliders within 8m (any bit, first 30): %s", #allTarget.hits > 0 and table.concat(allTarget.hits, "; ") or "none")
+    end
+    return inCell, cx, cz
 end
 
 -- Rock: the same stone layer that is a placeable's flat pad on one map is a cliff or
@@ -189,7 +361,9 @@ end
 
 -- Classifies one 64m chunk. Returns { forest = polygons, trail = polygons,
 -- road = polygons } or nil if the chunk holds no learned layer at all.
-function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
+-- waterMask (optional, n x n inner cells, from scanBuildingChunk): trail cells on
+-- water are dropped.
+function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize, waterMask)
     local cell = WailaTrailTracer.LAYER_SCAN_CELL_SIZE
     local halo = WailaTrailTracer.LAYER_SCAN_HALO_CELLS
     local n = math.floor(chunkSize / cell)
@@ -201,7 +375,11 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
 
     -- trees: one overlap query over the whole window says whether any trunk is here
     local windowHalf = w * cell * 0.5
-    local treesInWindow = overlapBox ~= nil and WailaTrailTracer.countTrees(winX + windowHalf, winZ + windowHalf, windowHalf) > 0
+    local windowTreeCount, windowTrees, windowTreeNodes = WailaTrailTracer.collectTrees(winX + windowHalf, winZ + windowHalf, windowHalf, true, WailaTrailTracer.TREE_WINDOW_HALF_HEIGHT)
+    -- positions also come from the per-cell queries below (small boxes, so a cap on the
+    -- results of the big window query cannot hide trees); both lists are merged at the end
+    local cellTrees, cellShapes = {}, 0
+    local treesInWindow = windowTreeCount > 0
 
     -- prefilter: every 2nd cell in both axes; most chunks hold nothing
     local anyHit = treesInWindow
@@ -249,7 +427,15 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
             if z > -half and z < half then
                 for col = 0, w - 1, per do
                     local x = winX + (col + per * 0.5) * cell
-                    if x > -half and x < half and WailaTrailTracer.countTrees(x, z, treeHalf) >= minCount then
+                    local cellCount, cellList = 0, nil
+                    if x > -half and x < half then
+                        cellCount, cellList = WailaTrailTracer.collectTrees(x, z, treeHalf)
+                        cellShapes = cellShapes + cellCount
+                        for _, p in ipairs(cellList) do
+                            cellTrees[#cellTrees + 1] = p
+                        end
+                    end
+                    if cellCount >= minCount then
                         for dr = 0, per - 1 do
                             for dc = 0, per - 1 do
                                 if row + dr < w and col + dc < w then
@@ -302,7 +488,14 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
         wornMask[row] = wornLine
     end
 
-    local result = { forest = {}, trail = {}, road = {} }
+    local result = { forest = {}, trail = {}, road = {}, trees = nil,
+        treeShapes = windowTreeCount, treeCallbacks = #windowTrees, treeNodes = windowTreeNodes, treeCellShapes = cellShapes }
+    do
+        local merged = {}
+        for _, p in ipairs(windowTrees) do merged[#merged + 1] = p end
+        for _, p in ipairs(cellTrees) do merged[#merged + 1] = p end
+        result.trees = WailaTrailTracer.chunkTrees(merged, minX, minZ, chunkSize)
+    end
 
     if forestCells > 0 or wornCells > 0 then
         local area = forestMask
@@ -350,7 +543,22 @@ function WailaTrailTracer.scanLayerChunk(minX, minZ, chunkSize)
             result.forest = WailaTrailTracer.traceMaskPolygons(cropInner(area, halo, n), minX, minZ, n, cell, WailaTrailTracer.LAYER_SCAN_FOREST_TOLERANCE)
         end
         if trailCells > 0 then
-            result.trail = WailaTrailTracer.traceMaskPolygons(cropInner(trail, halo, n), minX, minZ, n, cell, WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE)
+            local innerTrail = cropInner(trail, halo, n)
+            if waterMask ~= nil then
+                local removed = false
+                for row = 0, n - 1 do
+                    for col = 0, n - 1 do
+                        if waterMask[row][col] and innerTrail[row][col] then
+                            innerTrail[row][col] = false
+                            removed = true
+                        end
+                    end
+                end
+                if removed then
+                    WailaTrailTracer.cleanComponents(innerTrail, noProtectedRows, n, WailaTrailTracer.LAYER_SCAN_MIN_THIN_CELLS, 0)
+                end
+            end
+            result.trail = WailaTrailTracer.traceMaskPolygons(innerTrail, minX, minZ, n, cell, WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE)
         end
     end
 
@@ -378,6 +586,15 @@ WailaTrailTracer.BUILDING_MIN_HOLE_CELLS = 16
 WailaTrailTracer.STATIC_MIN_HEIGHT = 2.5
 WailaTrailTracer.STATIC_OPEN_RADIUS = 1
 WailaTrailTracer.STATIC_MIN_CELLS = 12
+-- Water: the same ray also accepts the WATER bit (Estancia: lake and river carry a
+-- WATER plane). A cell is water when the plane is this far above the terrain; the mask
+-- is grown a cell so the wet lakebed fringe goes too. Used to keep worn-ground
+-- "trails" off lakebeds (the dirt/gravel material under a river reads as a path).
+WailaTrailTracer.WATER_MIN_DEPTH = 0.15
+WailaTrailTracer.WATER_GROW_CELLS = 1
+WailaTrailTracer.WATER_MIN_CELLS = 6
+WailaTrailTracer.WATER_MIN_HOLE_CELLS = 16
+WailaTrailTracer.WATER_CURVE_TOLERANCE = 1.0
 
 local buildingRayTarget = {}
 function buildingRayTarget:onBuildingRayCallback(hitObjectId, x, y)
@@ -388,27 +605,33 @@ function buildingRayTarget:onBuildingRayCallback(hitObjectId, x, y)
 end
 
 -- Building polygons for one chunk (curve-fitted loops; corners are kept by the fit).
+-- Second return: the chunk's water mask (n x n, grown by a cell, for keeping trails off
+-- lakebeds), nil when there is no water. Third: the water polygons (drawn as the water layer).
 function WailaTrailTracer.scanBuildingChunk(minX, minZ, chunkSize)
     local cell = WailaTrailTracer.BUILDING_CELL_SIZE
     local n = math.floor(chunkSize / cell)
     local above = WailaTrailTracer.BUILDING_RAY_START_ABOVE
     local minHeight = WailaTrailTracer.BUILDING_MIN_HEIGHT
     local staticMinHeight = WailaTrailTracer.STATIC_MIN_HEIGHT
-    local rayMask = bit32.bor(CollisionFlag.BUILDING, CollisionFlag.STATIC_OBJECT)
-    local mask, staticMask, count, staticCount = {}, {}, 0, 0
+    local rayMask = bit32.bor(bit32.bor(CollisionFlag.BUILDING, CollisionFlag.STATIC_OBJECT), CollisionFlag.WATER)
+    local waterDepth = WailaTrailTracer.WATER_MIN_DEPTH
+    local mask, staticMask, waterMask, count, staticCount, waterCount = {}, {}, {}, 0, 0, 0
     for row = 0, n - 1 do
-        local line, staticLine = {}, {}
+        local line, staticLine, waterLine = {}, {}, {}
         local z = minZ + (row + 0.5) * cell
         for col = 0, n - 1 do
             local x = minX + (col + 0.5) * cell
             local terrainY = getTerrainHeightAtWorldPos(g_terrainNode, x, 0, z)
             buildingRayTarget.hitNode, buildingRayTarget.hitY = nil, nil
             raycastClosest(x, terrainY + above, z, 0, -1, 0, above + 5, "onBuildingRayCallback", buildingRayTarget, rayMask)
-            local hit, staticHit = false, false
+            local hit, staticHit, waterHit = false, false, false
             local node = buildingRayTarget.hitNode
             if node ~= nil then
                 local height = buildingRayTarget.hitY - terrainY
-                if height > minHeight and CollisionFlag.getHasGroupFlagSet(node, CollisionFlag.BUILDING) then
+                if CollisionFlag.getHasGroupFlagSet(node, CollisionFlag.WATER) then
+                    -- a plane below the terrain (every land cell sees one) is no water
+                    waterHit = height > waterDepth
+                elseif height > minHeight and CollisionFlag.getHasGroupFlagSet(node, CollisionFlag.BUILDING) then
                     hit = true
                 elseif height > staticMinHeight then
                     staticHit = true
@@ -416,6 +639,10 @@ function WailaTrailTracer.scanBuildingChunk(minX, minZ, chunkSize)
             end
             line[col] = hit
             staticLine[col] = staticHit
+            waterLine[col] = waterHit
+            if waterHit then
+                waterCount = waterCount + 1
+            end
             if hit then
                 count = count + 1
             end
@@ -425,6 +652,18 @@ function WailaTrailTracer.scanBuildingChunk(minX, minZ, chunkSize)
         end
         mask[row] = line
         staticMask[row] = staticLine
+        waterMask[row] = waterLine
+    end
+
+    local waterPolygons = {}
+    if waterCount > 0 then
+        local grown = dilateMask(waterMask, n, WailaTrailTracer.WATER_GROW_CELLS)
+        -- the water layer is drawn from the true (ungrown) water cells, cleaned
+        WailaTrailTracer.cleanComponents(waterMask, noProtectedRows, n, WailaTrailTracer.WATER_MIN_CELLS, WailaTrailTracer.WATER_MIN_HOLE_CELLS)
+        waterPolygons = WailaTrailTracer.traceMaskPolygons(waterMask, minX, minZ, n, cell, WailaTrailTracer.WATER_CURVE_TOLERANCE)
+        waterMask = grown
+    else
+        waterMask = nil
     end
 
     if staticCount > 0 then
@@ -442,12 +681,12 @@ function WailaTrailTracer.scanBuildingChunk(minX, minZ, chunkSize)
     end
 
     if count == 0 then
-        return {}
+        return {}, waterMask, waterPolygons
     end
     -- roof gaps (a ray between two roof parts) close; tiny specks go
     mask = erodeMask(dilateMask(mask, n, 1), n, 1)
     WailaTrailTracer.cleanComponents(mask, noProtectedRows, n, WailaTrailTracer.BUILDING_MIN_CELLS, WailaTrailTracer.BUILDING_MIN_HOLE_CELLS)
-    return WailaTrailTracer.traceMaskPolygons(mask, minX, minZ, n, cell, WailaTrailTracer.BUILDING_LAYER_CURVE_TOLERANCE)
+    return WailaTrailTracer.traceMaskPolygons(mask, minX, minZ, n, cell, WailaTrailTracer.BUILDING_LAYER_CURVE_TOLERANCE), waterMask, waterPolygons
 end
 
 -- ===== Roads by raycast (maps whose road meshes carry the ROAD collision bit) =====
@@ -621,55 +860,144 @@ end
 -- Starts the whole-map scan (TaskMap's Shift+G). wholeMapScanState drives
 -- TaskMap's progress bar and the save/load mutual-exclusion guards;
 -- tickWholeMapScan runs tickLayerScanStep inside the per-frame budget.
-function WailaTrailTracer.startWholeMapScan()
-    if WailaTrailTracer.loadState ~= nil or WailaTrailTracer.saveState ~= nil or WailaTrailTracer.wholeMapScanState ~= nil then
-        log("startWholeMapScan: refused -- a scan, save or load is already in progress")
-        return
-    end
-
-    WailaTrailTracer.clearScanOverlays()
-    WailaTrailTracer.savedRegionsByMaterial = { [1] = {}, [6] = {}, [7] = {} }
-    WailaTrailTracer.savedRegions = { forest = {}, road = {}, building = {} }
+-- Learns the map's layer classes and decides where roads come from (best first: ROAD colliders
+-- under the splines, the learned paint layer, spline ribbons). Shared by the whole-map scan and
+-- the area rescan, so both draw roads the same way. Returns splineRoads, roadRay.
+local function prepareScanSources(terrainSize, chunkSize, tag)
     WailaTrailTracer.learnLayerClasses()
     if not WailaTrailTracer.layerClassLearned then
         -- Not fatal (Estancia Lapacho: the paint does not tell roads from
         -- ground): trees, worn ground and buildings need no learned class.
-        log("startWholeMapScan: no layer classes learned on this map, scanning without them")
+        log("%s: no layer classes learned on this map, scanning without them", tag)
     end
-
-    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
-    local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
-    local chunksPerSide = math.ceil(terrainSize / chunkSize)
-
-    -- Road source, best first: collision (ROAD colliders under the splines),
-    -- then the learned paint layer, then the splines themselves as ribbons.
     local splineRoads, roadRay = nil, false
     local chains = WailaTrailTracer.collectRoadSplineChains()
     if #chains > 0 then
         local share, hits, tested = WailaTrailTracer.probeRoadCollision(chains)
         roadRay = share >= WailaTrailTracer.ROAD_RAY_PROBE_MIN_SHARE
-        log("startWholeMapScan: road collision probe %d/%d spline samples on a ROAD collider (%.0f%%): %s",
-            hits, tested, share * 100, roadRay and "roads by raycast" or "not used")
+        log("%s: road collision probe %d/%d spline samples on a ROAD collider (%.0f%%): %s",
+            tag, hits, tested, share * 100, roadRay and "roads by raycast" or "not used")
     end
+    WailaTrailTracer.roadSource = roadRay and "collision raycast" or (WailaTrailTracer.roadLayerLearned and "paint layer" or (#chains > 0 and "spline ribbons" or "none found"))
     if not roadRay and not WailaTrailTracer.roadLayerLearned then
         if #chains > 0 then
             splineRoads = WailaTrailTracer.ribbonsFromChains(chains, WailaTrailTracer.ROAD_SPLINE_FALLBACK_WIDTH, -terrainSize * 0.5, -terrainSize * 0.5, chunkSize)
-            log("startWholeMapScan: no road layer learned, drawing %d road spline(s) as %.0fm ribbons", #chains, WailaTrailTracer.ROAD_SPLINE_FALLBACK_WIDTH)
+            log("%s: no road layer learned, drawing %d road spline(s) as %.0fm ribbons", tag, #chains, WailaTrailTracer.ROAD_SPLINE_FALLBACK_WIDTH)
         end
     end
-    WailaTrailTracer.wholeMapScanState = {
+    return splineRoads, roadRay
+end
+
+-- A scan over the chunk range [colMin..colMax] x [rowMin..rowMax] (the whole map, or an area).
+function WailaTrailTracer.newScanState(terrainSize, chunkSize, colMin, colMax, rowMin, rowMax, isArea, splineRoads, roadRay)
+    return {
         originX = -terrainSize * 0.5,
         originZ = -terrainSize * 0.5,
         chunkSize = chunkSize,
-        chunksPerSide = chunksPerSide,
-        col = 0,
-        row = 0,
-        stats = { forestPolygons = 0, forestPoints = 0, trailPolygons = 0, trailPoints = 0, roadPolygons = 0, buildingPolygons = 0, emptyChunks = 0, totalMs = 0, maxMs = 0 },
+        chunksPerSide = math.ceil(terrainSize / chunkSize),
+        colMin = colMin, colMax = colMax, rowMin = rowMin, rowMax = rowMax,
+        col = colMin,
+        row = rowMin,
+        chunksTotal = (colMax - colMin + 1) * (rowMax - rowMin + 1),
+        chunksDone = 0,
+        isArea = isArea,
+        stats = { forestPolygons = 0, forestPoints = 0, trailPolygons = 0, trailPoints = 0, roadPolygons = 0, buildingPolygons = 0, waterPolygons = 0, trees = 0, treeShapes = 0, treeCallbacks = 0, treeNodes = 0, treeCellShapes = 0, emptyChunks = 0, totalMs = 0, maxMs = 0 },
         startTime = getTimeSec(),
         splineRoads = splineRoads,
         roadRay = roadRay,
     }
+end
+
+-- Moves to the next chunk of the state's range; true when the range is finished.
+function WailaTrailTracer.advanceChunkCursor(state)
+    state.chunksDone = state.chunksDone + 1
+    state.col = state.col + 1
+    if state.col > state.colMax then
+        state.col = state.colMin
+        state.row = state.row + 1
+    end
+    return state.row > state.rowMax
+end
+
+-- The chunk range of the square of (2 * radius + 1) chunks centred on the chunk holding (x, z),
+-- clamped to the map.
+function WailaTrailTracer.areaChunkRange(x, z, radius, terrainSize, chunkSize)
+    local perSide = math.ceil(terrainSize / chunkSize)
+    local col = math.max(0, math.min(perSide - 1, math.floor((x + terrainSize * 0.5) / chunkSize)))
+    local row = math.max(0, math.min(perSide - 1, math.floor((z + terrainSize * 0.5) / chunkSize)))
+    return math.max(0, col - radius), math.min(perSide - 1, col + radius), math.max(0, row - radius), math.min(perSide - 1, row + radius)
+end
+
+local function scanBusy()
+    return WailaTrailTracer.loadState ~= nil or WailaTrailTracer.saveState ~= nil or WailaTrailTracer.imageSaveState ~= nil
+        or WailaTrailTracer.wholeMapScanState ~= nil
+end
+
+-- Why a scan cannot start right now, for the HUD note ("Busy: restoring"); nil when it can.
+local function busyReason()
+    if WailaTrailTracer.wholeMapScanState ~= nil then
+        return "scanning"
+    elseif WailaTrailTracer.saveState ~= nil or WailaTrailTracer.imageSaveState ~= nil then
+        return "saving"
+    elseif WailaTrailTracer.loadState ~= nil then
+        return "restoring"
+    end
+    return nil
+end
+
+-- A short-lived line in the HUD's task strip (WailaHud.collectTaskRows), so a refused key press
+-- is not silent.
+WailaTrailTracer.NOTE_SECONDS = 4
+local function noteBusy(reason)
+    WailaTrailTracer.statusNote = { text = "Busy: " .. reason, untilTime = getTimeSec() + WailaTrailTracer.NOTE_SECONDS }
+end
+
+-- Starts the whole-map scan (TaskMap's Shift+G). wholeMapScanState drives
+-- TaskMap's progress bar and the save/load mutual-exclusion guards;
+-- tickWholeMapScan runs tickLayerScanStep inside the per-frame budget.
+function WailaTrailTracer.startWholeMapScan()
+    -- a restore that has not finished is replaced by this scan anyway: cancel it instead of
+    -- refusing (it waits a while after load, and a key press in that window did nothing)
+    if WailaTrailTracer.wholeMapScanState == nil and WailaTrailTracer.saveState == nil then
+        WailaTrailTracer.cancelRestore()
+        -- layer images still waiting to be written describe the state this scan replaces
+        WailaTrailTracer.imageSaveState = nil
+    end
+    if scanBusy() then
+        log("startWholeMapScan: refused -- a scan, save or load is already in progress")
+        noteBusy(busyReason())
+        return
+    end
+
+    WailaTrailTracer.clearScanOverlays()
+    WailaTrailTracer.savedRegionsByMaterial = { [1] = {}, [6] = {}, [7] = {} }
+    WailaTrailTracer.savedRegions = { forest = {}, water = {}, road = {}, building = {} }
+
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
+    local chunksPerSide = math.ceil(terrainSize / chunkSize)
+    local splineRoads, roadRay = prepareScanSources(terrainSize, chunkSize, "startWholeMapScan")
+    WailaTrailTracer.wholeMapScanState = WailaTrailTracer.newScanState(terrainSize, chunkSize, 0, chunksPerSide - 1, 0, chunksPerSide - 1, false, splineRoads, roadRay)
     log("startWholeMapScan: %d chunk(s) (%.0fm each) queued", chunksPerSide * chunksPerSide, chunkSize)
+end
+
+-- Rescans the chunks around (x, z) (default radius 1: a 3 x 3 chunk area, 192 m) and replaces only
+-- those chunks, through the same overlays, colours and stores as the whole-map scan. The same call
+-- is meant for a later trigger (a vehicle driving over ground). Returns true when started.
+WailaTrailTracer.AREA_SCAN_RADIUS_CHUNKS = 1
+function WailaTrailTracer.startAreaScan(x, z, radius)
+    if scanBusy() then
+        log("startAreaScan: refused -- a scan, save or load is already in progress")
+        noteBusy(busyReason())
+        return false
+    end
+    local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
+    local chunkSize = WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE
+    local colMin, colMax, rowMin, rowMax = WailaTrailTracer.areaChunkRange(x, z, radius or WailaTrailTracer.AREA_SCAN_RADIUS_CHUNKS, terrainSize, chunkSize)
+    local splineRoads, roadRay = prepareScanSources(terrainSize, chunkSize, "startAreaScan")
+    WailaTrailTracer.wholeMapScanState = WailaTrailTracer.newScanState(terrainSize, chunkSize, colMin, colMax, rowMin, rowMax, true, splineRoads, roadRay)
+    log("startAreaScan: %d chunk(s) around (%.0f, %.0f) queued", WailaTrailTracer.wholeMapScanState.chunksTotal, x, z)
+    return true
 end
 
 local function countPoints(polygons)
@@ -689,8 +1017,17 @@ function WailaTrailTracer.tickLayerScanStep(state)
     local stats = state.stats
 
     local chunkStart = getTimeSec()
-    local result = WailaTrailTracer.scanLayerChunk(minX, minZ, state.chunkSize)
-    local buildings = WailaTrailTracer.scanBuildingChunk(minX, minZ, state.chunkSize)
+    if state.isArea then
+        -- an area rescan replaces the chunk: wipe what is drawn there first
+        WailaTrailTracer.clearChunkOverlays(minX, minZ, maxX, maxZ)
+    end
+    local buildings, waterMask, waterPolygons = WailaTrailTracer.scanBuildingChunk(minX, minZ, state.chunkSize)
+    WailaTrailTracer.recordRegionPolygons("water", minX, minZ, maxX, maxZ, waterPolygons)
+    if #waterPolygons > 0 then
+        WailaTrailTracer.buildWaterLayerOverlayIncremental(waterPolygons)
+        stats.waterPolygons = stats.waterPolygons + #waterPolygons
+    end
+    local result = WailaTrailTracer.scanLayerChunk(minX, minZ, state.chunkSize, waterMask)
     WailaTrailTracer.recordRegionPolygons("building", minX, minZ, maxX, maxZ, buildings)
     if #buildings > 0 then
         WailaTrailTracer.buildBuildingLayerOverlayIncremental(buildings)
@@ -715,6 +1052,17 @@ function WailaTrailTracer.tickLayerScanStep(state)
         stats.trailPoints = stats.trailPoints + countPoints(result.trail)
     end
 
+    if result ~= nil and #result.trees > 0 then
+        WailaTrailTracer.buildTreeLayerOverlayIncremental(WailaTrailTracer.treeDots(result.trees))
+        stats.trees = stats.trees + #result.trees
+    end
+    if result ~= nil then
+        stats.treeShapes = stats.treeShapes + result.treeShapes
+        stats.treeCallbacks = stats.treeCallbacks + result.treeCallbacks
+        stats.treeNodes = stats.treeNodes + result.treeNodes
+        stats.treeCellShapes = stats.treeCellShapes + result.treeCellShapes
+    end
+
     local roads = (result ~= nil and result.road) or {}
     if state.roadRay then
         roads = WailaTrailTracer.scanRoadRayChunk(minX, minZ, state.chunkSize)
@@ -730,31 +1078,30 @@ function WailaTrailTracer.tickLayerScanStep(state)
     stats.totalMs = stats.totalMs + chunkMs
     stats.maxMs = math.max(stats.maxMs, chunkMs)
 
-    state.col = state.col + 1
-    if state.col >= state.chunksPerSide then
-        state.col = 0
-        state.row = state.row + 1
-    end
-    if state.row < state.chunksPerSide then
+    if not WailaTrailTracer.advanceChunkCursor(state) then
         return false
     end
 
     WailaTrailTracer.linkTrailFragments()
     WailaTrailTracer.buildTestOverlay({}, true)
     WailaTrailTracer.buildForestOverlayIncremental({}, true)
+    WailaTrailTracer.buildWaterLayerOverlayIncremental({}, true)
+    WailaTrailTracer.buildTreeLayerOverlayIncremental({}, true)
     WailaTrailTracer.buildRoadLayerOverlayIncremental({}, true)
     WailaTrailTracer.buildBuildingLayerOverlayIncremental({}, true)
     local elapsedMs = (getTimeSec() - state.startTime) * 1000
-    log("layer scan done: %d chunk(s) (%d empty), forest %d polygon(s) / %d point(s), trail %d / %d, road %d, building %d polygon(s)",
-        state.chunksPerSide * state.chunksPerSide, stats.emptyChunks, stats.forestPolygons, stats.forestPoints,
-        stats.trailPolygons, stats.trailPoints, stats.roadPolygons, stats.buildingPolygons)
+    log("layer scan done%s: %d chunk(s) (%d empty), forest %d polygon(s) / %d point(s), trail %d / %d, road %d, building %d, water %d polygon(s), %d tree(s)",
+        state.isArea and " (area)" or "", state.chunksTotal, stats.emptyChunks, stats.forestPolygons, stats.forestPoints,
+        stats.trailPolygons, stats.trailPoints, stats.roadPolygons, stats.buildingPolygons, stats.waterPolygons, stats.trees)
+    log("layer scan trees: %d dots; big window queries (overlap by the halo): %d shapes counted, %d callbacks, %d distinct node ids; per-cell 4m queries: %d shapes",
+        stats.trees, stats.treeShapes, stats.treeCallbacks, stats.treeNodes, stats.treeCellShapes)
     log("layer scan cost: %.0fms of scan work (worst chunk %.0fms), %.1fs wall", stats.totalMs, stats.maxMs, elapsedMs / 1000)
     WailaTrailTracer.wholeMapScanState = nil
 
     -- One button, one scan: the field index sweeps right after the layers
     -- (not alongside them, so the per-frame cost stays what it was).
     local fieldIndex = Waila ~= nil and Waila.indices ~= nil and Waila.indices.field or nil
-    if fieldIndex ~= nil and fieldIndex.requestFullSweep ~= nil then
+    if not state.isArea and fieldIndex ~= nil and fieldIndex.requestFullSweep ~= nil then
         fieldIndex:requestFullSweep()
     end
     return true

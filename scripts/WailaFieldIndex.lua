@@ -55,9 +55,11 @@ WailaFieldIndex.VEHICLE_LEFT_FIELD = nextMessageTypeId()
 -- in-progress boundary trace, neither of which has a natural "cell" unit
 -- anymore the way pure grid flood-fill did.
 WailaFieldIndex.SCAN_BUDGET_SEC = 0.003
+-- snapshot refresh only (see refreshFieldSnapshots), never a full sweep
 WailaFieldIndex.RESWEEP_FALLBACK_INTERVAL = 180000
 WailaFieldIndex.VEHICLE_CHECK_INTERVAL = 500
 WailaFieldIndex.STARTUP_SWEEP_DELAY_MS = 20000
+WailaFieldIndex.BLOB_RESCAN_COOLDOWN_SEC = 60
 WailaFieldIndex.BLOB_MATCH_RADIUS = 150
 WailaFieldIndex.SAVEGAME_FILENAME = "waila.xml"
 
@@ -83,6 +85,9 @@ function WailaFieldIndex.new()
     self.lastSweepDurationSec = nil
 
     self.resweepFallbackTimer = 0
+    self.blobQueue = {}
+    self.blobRescanAt = {}
+    self.activeBlob = nil
     self.vehicleCheckTimer = 0
     self.vehicleFieldState = {}
 
@@ -121,6 +126,33 @@ function WailaFieldIndex:startFullSweep()
     log("[WailaFieldIndex] Field sweep started")
 end
 
+-- For the on-screen progress line (TaskMap draws it): nil when there is nothing to show,
+-- otherwise one of { waiting, delaySec } / { total, done, found, holes, skipped, elapsed }
+-- / { finished, found, elapsed } (the last for 10 s after a sweep ends).
+WailaFieldIndex.FINISHED_DISPLAY_SEC = 10
+function WailaFieldIndex:getSweepProgress()
+    if self.isSweeping and self.scanner ~= nil then
+        local total = self.scanner.cols * self.scanner.rows
+        return {
+            total = total,
+            done = math.min(self.scanner.sweepIndex, total),
+            found = self.pendingEntries ~= nil and #self.pendingEntries or 0,
+            holes = #self.scanner.holes,
+            skipped = self.scanner.holeSeedsSkipped,
+            traces = self.scanner.tracesStarted - self.scanner.holeSeedsSkipped, -- outlines actually traced
+            elapsed = self.sweepStartTime ~= nil and (getTimeSec() - self.sweepStartTime) or 0,
+        }
+    end
+    if self.startupSweepDelayMs ~= nil then
+        return { waiting = true, delaySec = math.max(0, self.startupSweepDelayMs / 1000) }
+    end
+    if self.lastSweepFinishedAt ~= nil and self.entries ~= nil
+        and getTimeSec() - self.lastSweepFinishedAt < WailaFieldIndex.FINISHED_DISPLAY_SEC then
+        return { finished = true, found = #self.entries, elapsed = self.lastSweepDurationSec or 0 }
+    end
+    return nil
+end
+
 -- Whole-map scan (Shift+G) entry point: sweep now, even if a saved field
 -- list was trusted at startup. false if the scanner is not ready yet or a
 -- sweep is already running.
@@ -133,8 +165,23 @@ function WailaFieldIndex:requestFullSweep()
     return true
 end
 
+-- Field outlines do not change with growth, only what stands on them does:
+-- re-read each entry's field snapshot (one inspectPoint per field, no
+-- tracing). The outlines themselves are kept fresh by the vehicle-left-field
+-- blob rescan and the manual whole-map scan, not by periodic full sweeps.
+function WailaFieldIndex:refreshFieldSnapshots()
+    if self.entries == nil then
+        return
+    end
+    for _, entry in ipairs(self.entries) do
+        entry.field = self.fieldInspector:inspectPoint(entry.sampleX, 0, entry.sampleZ)
+    end
+end
+
 function WailaFieldIndex:onFinishedGrowthPeriod()
-    self:startFullSweep()
+    if not self.isSweeping then
+        self:refreshFieldSnapshots()
+    end
 end
 
 -- Now that real polygon boundaries exist, id stability across sweeps is
@@ -210,8 +257,8 @@ function WailaFieldIndex:advanceFieldScan()
     if labelX ~= nil and not sweepCompleted then
         local entry = self:buildEntry(labelX, labelZ, sampleX, sampleZ, riceField, boundary)
         table.insert(self.pendingEntries, entry)
-        log(string.format("[WailaFieldIndex] Field found: wailaFieldId=%d area=%.0fm^2 boundaryPoints=%d label=(%.1f, %.1f)",
-            entry.wailaFieldId, areaSqm or -1, entry.boundaryPositions ~= nil and #entry.boundaryPositions or 0, labelX, labelZ))
+        WailaConfig.debug("[WailaFieldIndex] Field found: wailaFieldId=%d area=%.0fm^2 boundaryPoints=%d label=(%.1f, %.1f)",
+            entry.wailaFieldId, areaSqm or -1, entry.boundaryPositions ~= nil and #entry.boundaryPositions or 0, labelX, labelZ)
     end
 
     if sweepCompleted then
@@ -220,6 +267,7 @@ function WailaFieldIndex:advanceFieldScan()
         self.isSweeping = false
         self.hasCompletedSweep = true
         self.lastSweepDurationSec = self.sweepStartTime ~= nil and (getTimeSec() - self.sweepStartTime) or nil
+        self.lastSweepFinishedAt = getTimeSec()
         log(string.format("[WailaFieldIndex] Field sweep finished in %.1fs, %d entr%s found",
             self.lastSweepDurationSec or -1, #self.entries, #self.entries == 1 and "y" or "ies"))
     end
@@ -270,8 +318,57 @@ function WailaFieldIndex:rescanBlobAt(vehicleOrPlayer, x, z)
         return
     end
 
-    local existingIndex = self:findNearestEntryIndex(x, z)
-    local labelX, labelZ, sampleX, sampleZ, areaSqm, riceField, boundary = self.scanner:scanBlobAt(x, z)
+    -- Turning at a headland crosses the same edge again and again: one
+    -- rescan per field per cooldown is plenty, the rest just report the
+    -- entry we already have.
+    local existing = self:getEntry(x, z)
+    local key = existing ~= nil and existing.wailaFieldId or string.format("%d:%d", math.floor(x / 64), math.floor(z / 64))
+    local now = getTimeSec()
+    local last = self.blobRescanAt[key]
+    if last ~= nil and now - last < WailaFieldIndex.BLOB_RESCAN_COOLDOWN_SEC then
+        g_messageCenter:publish(WailaFieldIndex.VEHICLE_LEFT_FIELD, vehicleOrPlayer, existing)
+        return
+    end
+    self.blobRescanAt[key] = now
+
+    table.insert(self.blobQueue, { entity = vehicleOrPlayer, x = x, z = z, startedAt = now })
+end
+
+-- Advances the queued single-field rescans by SCAN_BUDGET_SEC: one field is
+-- traced at a time, a few ms per tick, so a big field costs frames spread
+-- over time instead of one long stall.
+function WailaFieldIndex:advanceBlobRescans()
+    if self.activeBlob == nil then
+        local job = table.remove(self.blobQueue, 1)
+        if job == nil then
+            return
+        end
+        job.tracer = self.scanner:beginBlobScan(job.x, job.z)
+        self.activeBlob = job
+        if job.tracer == nil then
+            self:finishBlobRescan(job, nil)
+            return
+        end
+    end
+
+    local job = self.activeBlob
+    if job.tracer:update(WailaFieldIndex.SCAN_BUDGET_SEC) then
+        return
+    end
+    self:finishBlobRescan(job, { self.scanner:finishBlobScan(job.tracer, job.x, job.z) })
+end
+
+-- result: the packed finishBlobScan values, or nil when the start point is
+-- no longer field ground. Patches self.entries in place (replace/add/remove)
+-- and fires VEHICLE_LEFT_FIELD with whatever entry resulted (nil if the
+-- ground isn't field anymore).
+function WailaFieldIndex:finishBlobRescan(job, result)
+    self.activeBlob = nil
+    local existingIndex = self:findNearestEntryIndex(job.x, job.z)
+    local labelX, labelZ, sampleX, sampleZ, areaSqm, riceField, boundary
+    if result ~= nil then
+        labelX, labelZ, sampleX, sampleZ, areaSqm, riceField, boundary = unpack(result, 1, 7)
+    end
 
     local resultEntry = nil
 
@@ -282,7 +379,7 @@ function WailaFieldIndex:rescanBlobAt(vehicleOrPlayer, x, z)
     else
         local entry = self:buildEntry(labelX, labelZ, sampleX, sampleZ, riceField, boundary)
         if existingIndex ~= nil then
-            -- Keep the OLD labelX/labelZ -- scanBlobAt() anchors its own
+            -- Keep the OLD labelX/labelZ -- the rescan anchors its own
             -- label pick to wherever ITS trace started (the vehicle's
             -- exit point), not the blob's stable full-sweep-order
             -- position -- overwriting it would make the label hop around
@@ -294,6 +391,8 @@ function WailaFieldIndex:rescanBlobAt(vehicleOrPlayer, x, z)
             table.insert(self.entries, entry)
         end
         resultEntry = entry
+        -- a field that had no entry when it was queued is now known by id
+        self.blobRescanAt[entry.wailaFieldId] = job.startedAt
     end
 
     -- Unconditional lifesign at the publish site itself, not just
@@ -302,7 +401,7 @@ function WailaFieldIndex:rescanBlobAt(vehicleOrPlayer, x, z)
     -- actually fire this" needs to be independently confirmable from
     -- "did the subscriber handle it correctly".
     log("[VehicleTracking] firing VEHICLE_LEFT_FIELD entry=%s", tostring(resultEntry and resultEntry.wailaFieldId))
-    g_messageCenter:publish(WailaFieldIndex.VEHICLE_LEFT_FIELD, vehicleOrPlayer, resultEntry)
+    g_messageCenter:publish(WailaFieldIndex.VEHICLE_LEFT_FIELD, job.entity, resultEntry)
 end
 
 -- Polls the player and every currently AI-active vehicle for an on-field
@@ -761,9 +860,11 @@ function WailaFieldIndex:update(dt)
         return
     end
 
+    self:advanceBlobRescans()
+
     self.resweepFallbackTimer = self.resweepFallbackTimer + dt
     if self.resweepFallbackTimer >= WailaFieldIndex.RESWEEP_FALLBACK_INTERVAL then
         self.resweepFallbackTimer = 0
-        self:startFullSweep()
+        self:refreshFieldSnapshots()
     end
 end

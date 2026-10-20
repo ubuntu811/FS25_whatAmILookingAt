@@ -74,14 +74,28 @@ local MATERIAL_COLOR_DEBUG = {
 }
 WailaTrailTracer.debugColors = false
 WailaTrailTracer.PALETTE = {
-    normal = { forest = { 0.02, 0.2, 0.04 }, road = { 0.12, 0.12, 0.12 }, building = { 0.55, 0.5, 0.45 } },
-    debug = { forest = { 0.2, 1.0, 0.2 }, road = { 1.0, 0.4, 0.0 }, building = { 1.0, 0.0, 0.0 } },
+    normal = { forest = { 0.02, 0.2, 0.04 }, tree = { 0.05, 0.5, 0.08 }, water = { 0.05, 0.2, 0.45 }, road = { 0.12, 0.12, 0.12 }, building = { 0.55, 0.5, 0.45 } },
+    debug = { forest = { 0.2, 1.0, 0.2 }, tree = { 1.0, 1.0, 0.0 }, water = { 0.0, 0.3, 1.0 }, road = { 1.0, 0.4, 0.0 }, building = { 1.0, 0.0, 0.0 } },
 }
+-- Normal colours come from WailaMapSettings (per savegame, editable in the
+-- debug hub's Map layers tab); the tables above are the fallback.
 local function paletteColor(name)
-    return WailaTrailTracer.PALETTE[WailaTrailTracer.debugColors and "debug" or "normal"][name]
+    if WailaTrailTracer.debugColors then
+        return WailaTrailTracer.PALETTE.debug[name]
+    end
+    if WailaMapSettings ~= nil and WailaMapSettings.get(name) ~= nil then
+        return WailaMapSettings.get(name).color
+    end
+    return WailaTrailTracer.PALETTE.normal[name]
 end
 local function materialColor(materialId)
-    return (WailaTrailTracer.debugColors and MATERIAL_COLOR_DEBUG or MATERIAL_COLOR)[materialId]
+    if WailaTrailTracer.debugColors then
+        return MATERIAL_COLOR_DEBUG[materialId]
+    end
+    if WailaMapSettings ~= nil then
+        return WailaMapSettings.get("trail").color
+    end
+    return MATERIAL_COLOR[materialId]
 end
 
 -- Real, confirmed live bug (229,673 polygons written in one blocking
@@ -135,8 +149,8 @@ WailaTrailTracer.SAVEGAME_FILENAME = "wailaTrail.xml"
 -- replaced when the region is rescanned, an empty rescan removes the entry. Forest
 -- outlines are already simplified (traceForestPolygonsFromGrid), so none of these
 -- are re-smoothed on load.
-WailaTrailTracer.REGION_LAYERS = { "forest", "road", "building" }
-WailaTrailTracer.savedRegions = { forest = {}, road = {}, building = {} }
+WailaTrailTracer.REGION_LAYERS = { "forest", "water", "road", "building" }
+WailaTrailTracer.savedRegions = { forest = {}, water = {}, road = {}, building = {} }
 
 function WailaTrailTracer.recordRegionPolygons(layer, minX, minZ, maxX, maxZ, polygons)
     local regionKey = string.format("%.1f_%.1f_%.1f_%.1f", minX, minZ, maxX, maxZ)
@@ -1392,6 +1406,7 @@ function WailaTrailTracer.learnLayerClasses()
 
     WailaTrailTracer.layerClassLearned = roadKeys + forestKeys > 0
     WailaTrailTracer.roadLayerLearned = roadKeys > 0
+    WailaTrailTracer.learnedRoadKeys, WailaTrailTracer.learnedForestKeys = roadKeys, forestKeys
     log("LayerClasses: learned %d road + %d forest layer(s) from %d spline(s) / %d spline sample(s), %d map cell(s), %.0fms",
         roadKeys, forestKeys, splineCount, splineTotal, mapTotal, (getTimeSec() - startTime) * 1000)
 end
@@ -2158,6 +2173,8 @@ end
 -- Road and building layers: one overlay each (a single-value bit-vector map), written
 -- polygon by polygon, regenerated at most every few seconds while a scan runs.
 local simpleLayers = {
+    tree = { mapField = "treeLayerOverlayMap", overlayField = "treeLayerOverlay", name = "wailaTreeLayerOverlay", lastRegenerate = nil },
+    water = { mapField = "waterLayerOverlayMap", overlayField = "waterLayerOverlay", name = "wailaWaterLayerOverlay", lastRegenerate = nil },
     road = { mapField = "roadLayerOverlayMap", overlayField = "roadLayerOverlay", name = "wailaRoadLayerOverlay", lastRegenerate = nil },
     building = { mapField = "buildingLayerOverlayMap", overlayField = "buildingLayerOverlay", name = "wailaBuildingLayerOverlay", lastRegenerate = nil },
 }
@@ -2172,13 +2189,15 @@ local function buildSimpleLayerOverlay(layer, polygons, forceRegenerate)
         WailaTrailTracer[def.overlayField] = createDensityMapVisualizationOverlay(def.name, size, size)
     end
 
-    local modifier = DensityMapModifier.new(WailaTrailTracer[def.mapField], 0, 1, g_terrainNode)
-    for _, polygon in ipairs(polygons) do
-        modifier:clearPolygonPoints()
-        for _, point in ipairs(polygon) do
-            modifier:addPolygonPointWorldCoords(point[1], point[2])
+    if #polygons > 0 then
+        local modifier = DensityMapModifier.new(WailaTrailTracer[def.mapField], 0, 1, g_terrainNode)
+        for _, polygon in ipairs(polygons) do
+            modifier:clearPolygonPoints()
+            for _, point in ipairs(polygon) do
+                modifier:addPolygonPointWorldCoords(point[1], point[2])
+            end
+            modifier:executeSet(1)
         end
-        modifier:executeSet(1)
     end
 
     local now = getTimeSec()
@@ -2198,6 +2217,15 @@ function WailaTrailTracer.buildRoadLayerOverlayIncremental(polygons, forceRegene
     buildSimpleLayerOverlay("road", polygons, forceRegenerate)
 end
 
+-- Tree dots: a plain overlay like water, but not part of the saved scan (REGION_LAYERS).
+function WailaTrailTracer.buildTreeLayerOverlayIncremental(polygons, forceRegenerate)
+    buildSimpleLayerOverlay("tree", polygons, forceRegenerate)
+end
+
+function WailaTrailTracer.buildWaterLayerOverlayIncremental(polygons, forceRegenerate)
+    buildSimpleLayerOverlay("water", polygons, forceRegenerate)
+end
+
 function WailaTrailTracer.buildBuildingLayerOverlayIncremental(polygons, forceRegenerate)
     buildSimpleLayerOverlay("building", polygons, forceRegenerate)
 end
@@ -2206,6 +2234,8 @@ end
 function WailaTrailTracer.drawRegionPolygons(layer, polygons, forceRegenerate)
     if layer == "forest" then
         WailaTrailTracer.buildForestOverlayIncremental(polygons, forceRegenerate)
+    elseif layer == "water" then
+        WailaTrailTracer.buildWaterLayerOverlayIncremental(polygons, forceRegenerate)
     elseif layer == "road" then
         WailaTrailTracer.buildRoadLayerOverlayIncremental(polygons, forceRegenerate)
     elseif layer == "building" then
@@ -2220,18 +2250,219 @@ function WailaTrailTracer.regionOverlayExists(layer)
     return WailaTrailTracer[simpleLayers[layer].mapField] ~= nil
 end
 
+-- ===== Drivable ground for other mods =====
+-- 0 = neither, 1 = worn trail, 2 = road, read from the layer bitmaps (the same data the map shows,
+-- whether it was just scanned or restored from images). Published through
+-- g_currentMission.wailaTrailTracer; the road-following mod steers by it.
+function WailaTrailTracer.sampleDrivable(x, z)
+    local size = g_currentMission ~= nil and g_currentMission.terrainSize or nil
+    if size == nil then
+        return 0
+    end
+    local resolution = WailaTrailTracer.OVERLAY_RESOLUTION
+    local px = math.floor(resolution * (x + size * 0.5) / size)
+    local pz = math.floor(resolution * (z + size * 0.5) / size)
+    if px < 0 or pz < 0 or px >= resolution or pz >= resolution then
+        return 0
+    end
+    local road = WailaTrailTracer.roadLayerOverlayMap
+    if road ~= nil and getBitVectorMapPoint(road, px, pz, 0, 1) ~= 0 then
+        return 2
+    end
+    local trail = WailaTrailTracer.testOverlayMap
+    if trail ~= nil and getBitVectorMapPoint(trail, px, pz, 0, WailaTrailTracer.OVERLAY_NUM_CHANNELS) ~= 0 then
+        return 1
+    end
+    return 0
+end
+
+-- True once there is any road or trail data to read (scanned this session or restored).
+function WailaTrailTracer.hasDrivableData()
+    return WailaTrailTracer.roadLayerOverlayMap ~= nil or WailaTrailTracer.testOverlayMap ~= nil
+end
+
+-- ===== Layer images =====
+-- Every overlay is a bit-vector map. The engine saves and loads those as .grle files (measured on
+-- Estancia: 14-24 ms to save and 32-37 ms to load a 2048 x 2048 layer, identical content), so after
+-- a game save each layer is written as an image and on load the images come back in a fraction of
+-- a second, instead of re-drawing thousands of polygons. The polygon store (wailaTrail.xml) stays:
+-- trail linking reads it, and it is the fallback for any layer whose image is missing or unreadable.
+WailaTrailTracer.IMAGE_LAYERS = { "forest", "trail", "road", "building", "water", "tree" }
+WailaTrailTracer.IMAGE_SAVE_INTERVAL_SEC = 0.25
+WailaTrailTracer.IMAGE_LOAD_DELAY_SEC = 3
+
+local function layerImageInfo(layer)
+    if layer == "forest" then
+        return { mapField = "forestOverlayMap", overlayField = "forestOverlay", name = "wailaForestOverlay", channels = 2,
+            recolor = function() WailaTrailTracer.buildForestOverlayIncremental({}, true) end }
+    elseif layer == "trail" then
+        return { mapField = "testOverlayMap", overlayField = "testOverlay", name = "wailaTrailOverlayTest",
+            channels = WailaTrailTracer.OVERLAY_NUM_CHANNELS, recolor = function() WailaTrailTracer.buildTestOverlay({}, true) end }
+    end
+    local def = simpleLayers[layer]
+    return { mapField = def.mapField, overlayField = def.overlayField, name = def.name, channels = 1,
+        recolor = function() buildSimpleLayerOverlay(layer, {}, true) end }
+end
+
+local function layerImagePath(directory, layer)
+    return string.format("%s/wailaLayer_%s.grle", directory, layer)
+end
+
+local function savegameDirectoryOrNil()
+    local info = g_currentMission ~= nil and g_currentMission.missionInfo or nil
+    return info ~= nil and info.savegameDirectory or nil
+end
+
+-- Image files that exist in the savegame folder: { { layer, path }, ... }
+function WailaTrailTracer.findLayerImages(directory)
+    local found = {}
+    if fileExists == nil then
+        return found
+    end
+    for _, layer in ipairs(WailaTrailTracer.IMAGE_LAYERS) do
+        local path = layerImagePath(directory, layer)
+        if fileExists(path) then
+            found[#found + 1] = { layer = layer, path = path }
+        end
+    end
+    return found
+end
+
+-- Save: one layer every IMAGE_SAVE_INTERVAL_SEC (a layer is one 15-25 ms call, so they do not land
+-- on consecutive frames). Started by tickSaveToXML once the polygon file is written.
+function WailaTrailTracer.startImageSave()
+    if WailaTrailTracer.imageSaveState ~= nil or WailaTrailTracer.wholeMapScanState ~= nil then
+        return false
+    end
+    local directory = savegameDirectoryOrNil()
+    if directory == nil or saveBitVectorMapToFile == nil then
+        return false
+    end
+    local queue = {}
+    for _, layer in ipairs(WailaTrailTracer.IMAGE_LAYERS) do
+        if WailaTrailTracer[layerImageInfo(layer).mapField] ~= nil then
+            queue[#queue + 1] = layer
+        end
+    end
+    if #queue == 0 then
+        return false
+    end
+    WailaTrailTracer.imageSaveState = {
+        directory = directory, queue = queue, index = 1, totalMs = 0,
+        startTime = getTimeSec(), nextAt = getTimeSec() + WailaTrailTracer.IMAGE_SAVE_INTERVAL_SEC,
+    }
+    log("startImageSave: %d layer image(s) queued", #queue)
+    return true
+end
+
+local function saveOneLayerImage(state)
+    local layer = state.queue[state.index]
+    state.index = state.index + 1
+    local map = WailaTrailTracer[layerImageInfo(layer).mapField]
+    if map == nil then
+        return
+    end
+    local t0 = getTimeSec()
+    local ok, err = pcall(saveBitVectorMapToFile, map, layerImagePath(state.directory, layer))
+    state.totalMs = state.totalMs + (getTimeSec() - t0) * 1000
+    if not ok then
+        log("layer image save FAILED for %s: %s", layer, tostring(err))
+    end
+end
+
+local function finishImageSave(state)
+    log("layer images written: %d in %.0f ms of work (%.1fs wall)", #state.queue, state.totalMs, getTimeSec() - state.startTime)
+    WailaTrailTracer.imageSaveState = nil
+end
+
+function WailaTrailTracer.tickImageSave()
+    local state = WailaTrailTracer.imageSaveState
+    if state == nil then
+        return true
+    end
+    if getTimeSec() < state.nextAt then
+        return false
+    end
+    saveOneLayerImage(state)
+    state.nextAt = getTimeSec() + WailaTrailTracer.IMAGE_SAVE_INTERVAL_SEC
+    if state.index > #state.queue then
+        finishImageSave(state)
+        return true
+    end
+    return false
+end
+
+-- At teardown: write whatever is still queued, now.
+function WailaTrailTracer.flushImageSave()
+    local state = WailaTrailTracer.imageSaveState
+    if state == nil then
+        return
+    end
+    while state.index <= #state.queue do
+        saveOneLayerImage(state)
+    end
+    finishImageSave(state)
+end
+
+-- Restore one layer from its image; false (and the polygon restore draws that layer instead) when
+-- the file does not load or is not the overlay's size.
+function WailaTrailTracer.restoreLayerImage(layer, path)
+    local info = layerImageInfo(layer)
+    if WailaTrailTracer[info.mapField] ~= nil then
+        log("layer image for %s skipped: the layer already exists this session", layer)
+        return false
+    end
+    local size = WailaTrailTracer.OVERLAY_RESOLUTION
+    local map = createBitVectorMap(info.name .. "Map")
+    local ok, result = pcall(loadBitVectorMapFromFile, map, path, info.channels)
+    local okSize, width, height = pcall(getBitVectorMapSize, map)
+    if not (ok and result == true and okSize and width == size and height == size) then
+        log("layer image for %s could not be used (load ok=%s result=%s size %sx%s), drawing its polygons instead",
+            layer, tostring(ok), tostring(result), tostring(width), tostring(height))
+        return false
+    end
+    WailaTrailTracer[info.mapField] = map
+    WailaTrailTracer[info.overlayField] = createDensityMapVisualizationOverlay(info.name, size, size)
+    info.recolor()
+    return true
+end
+
 -- Debug colour mode: re-colour every existing overlay (one regenerate each).
 function WailaTrailTracer.setDebugColors(enabled)
     WailaTrailTracer.debugColors = enabled == true
+    WailaTrailTracer.recolorOverlays()
+    log("overlay colours: %s mode", WailaTrailTracer.debugColors and "DEBUG (loud)" or "normal")
+end
+
+-- Re-colour every existing overlay from the current settings (no rescan: the
+-- bitmaps stay, only the state colours change).
+function WailaTrailTracer.recolorOverlays()
     if WailaTrailTracer.testOverlayMap ~= nil then
         WailaTrailTracer.buildTestOverlay({}, true)
+    end
+    if WailaTrailTracer.treeLayerOverlayMap ~= nil then
+        buildSimpleLayerOverlay("tree", {}, true)
     end
     for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
         if WailaTrailTracer.regionOverlayExists(layer) then
             WailaTrailTracer.drawRegionPolygons(layer, {}, true)
         end
     end
-    log("overlay colours: %s mode", WailaTrailTracer.debugColors and "DEBUG (loud)" or "normal")
+end
+
+-- What TaskMap draws with: debug colours are always fully opaque and visible.
+function WailaTrailTracer.getLayerAlpha(layer)
+    if WailaTrailTracer.debugColors or WailaMapSettings == nil then
+        return 1.0
+    end
+    return WailaMapSettings.get(layer).alpha
+end
+
+function WailaTrailTracer.isLayerVisible(layer)
+    if WailaTrailTracer.debugColors or WailaMapSettings == nil then
+        return true
+    end
+    return WailaMapSettings.get(layer).visible
 end
 
 function WailaTrailTracer.toggleDebugColors()
@@ -2329,23 +2560,41 @@ WailaTrailTracer.WHOLE_MAP_SCAN_CHUNK_SIZE = 64.0
 -- scan or a loaded save had left there (confirmed live: stale 16m forest
 -- squares from an older scan stuck out around the new refined outline).
 -- A whole-map scan rewrites every region, so start from blank.
+-- Sets one rectangle of a bit-vector overlay map back to 0.
+local function clearMapRect(map, numChannels, minX, minZ, maxX, maxZ)
+    if map == nil then
+        return
+    end
+    local modifier = DensityMapModifier.new(map, 0, numChannels, g_terrainNode)
+    modifier:clearPolygonPoints()
+    modifier:addPolygonPointWorldCoords(minX, minZ)
+    modifier:addPolygonPointWorldCoords(maxX, minZ)
+    modifier:addPolygonPointWorldCoords(maxX, maxZ)
+    modifier:addPolygonPointWorldCoords(minX, maxZ)
+    modifier:executeSet(0)
+end
+
+-- Every scan overlay (trail, forest, water, trees, road, buildings) cleared inside one rectangle:
+-- an area rescan wipes the chunks it is about to redraw, nothing else.
+function WailaTrailTracer.clearChunkOverlays(minX, minZ, maxX, maxZ)
+    clearMapRect(WailaTrailTracer.testOverlayMap, WailaTrailTracer.OVERLAY_NUM_CHANNELS, minX, minZ, maxX, maxZ)
+    clearMapRect(WailaTrailTracer.forestOverlayMap, 2, minX, minZ, maxX, maxZ)
+    clearMapRect(WailaTrailTracer.waterLayerOverlayMap, 1, minX, minZ, maxX, maxZ)
+    clearMapRect(WailaTrailTracer.treeLayerOverlayMap, 1, minX, minZ, maxX, maxZ)
+    clearMapRect(WailaTrailTracer.roadLayerOverlayMap, 1, minX, minZ, maxX, maxZ)
+    clearMapRect(WailaTrailTracer.buildingLayerOverlayMap, 1, minX, minZ, maxX, maxZ)
+end
+
 function WailaTrailTracer.clearScanOverlays()
     local terrainSize = (g_currentMission ~= nil and g_currentMission.terrainSize) or 2048
     local half = terrainSize * 0.5
     local function clearMap(map, numChannels)
-        if map == nil then
-            return
-        end
-        local modifier = DensityMapModifier.new(map, 0, numChannels, g_terrainNode)
-        modifier:clearPolygonPoints()
-        modifier:addPolygonPointWorldCoords(-half, -half)
-        modifier:addPolygonPointWorldCoords(half, -half)
-        modifier:addPolygonPointWorldCoords(half, half)
-        modifier:addPolygonPointWorldCoords(-half, half)
-        modifier:executeSet(0)
+        clearMapRect(map, numChannels, -half, -half, half, half)
     end
     clearMap(WailaTrailTracer.testOverlayMap, WailaTrailTracer.OVERLAY_NUM_CHANNELS)
     clearMap(WailaTrailTracer.forestOverlayMap, 2)
+    clearMap(WailaTrailTracer.waterLayerOverlayMap, 1)
+    clearMap(WailaTrailTracer.treeLayerOverlayMap, 1)
     clearMap(WailaTrailTracer.roadLayerOverlayMap, 1)
     clearMap(WailaTrailTracer.buildingLayerOverlayMap, 1)
     if WailaTrailTracer.testOverlayMap ~= nil then
@@ -2505,6 +2754,8 @@ function WailaTrailTracer.tickSaveToXML()
     local elapsedMs = (getTimeSec() - state.startTime) * 1000
     log("tickSaveToXML done: %d polygon(s) written to %s in %.0fms (%.1fs)", #state.workItems, state.path, elapsedMs, elapsedMs / 1000)
     WailaTrailTracer.saveState = nil
+    -- the layer images follow the polygon file, so the two describe the same moment
+    WailaTrailTracer.startImageSave()
     return true
 end
 
@@ -2518,6 +2769,7 @@ end
 -- so a save made right after a load -- with no new scanning in between --
 -- still dedupes correctly against what was loaded.
 WailaTrailTracer.LOAD_TICK_BUDGET_SEC = 0.005
+WailaTrailTracer.LOAD_START_DELAY_SEC = 15
 
 -- Real, confirmed live bug: every early-return path here was completely
 -- silent -- confirmed via log, startLoadFromXML logged its "queued"
@@ -2550,9 +2802,14 @@ function WailaTrailTracer.startLoadFromXML()
 
     local path = savegameDirectory .. "/" .. WailaTrailTracer.SAVEGAME_FILENAME
     local xmlFile = XMLFile.loadIfExists("wailaTrail", path)
-    if xmlFile == nil then
-        log("startLoadFromXML: no file at %s (or failed to load), nothing to restore", path)
+    local imageFiles = WailaTrailTracer.findLayerImages(savegameDirectory)
+    if xmlFile == nil and #imageFiles == 0 then
+        log("startLoadFromXML: no file at %s (or failed to load) and no layer images, nothing to restore", path)
         return
+    end
+    if xmlFile == nil then
+        -- images without a polygon file: restore the images, no polygons
+        xmlFile = { iterator = function() return function() end end, delete = function() end, getString = function() end }
     end
 
     local loadedRegions = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} }
@@ -2597,6 +2854,7 @@ function WailaTrailTracer.startLoadFromXML()
         loadedLayers = loadedLayers,
         pendingLayers = pendingLayers,
         pendingByMaterial = { [MATERIAL_DIRT] = {}, [MATERIAL_GRAVEL] = {}, [MATERIAL_STONE] = {} },
+        images = { queue = imageFiles, index = 1, restored = {} },
         startTime = getTimeSec(),
         lastProgressLogTime = getTimeSec(),
         polygonCount = 0,
@@ -2609,16 +2867,20 @@ function WailaTrailTracer.startLoadFromXML()
         end
         regionCounts[#regionCounts + 1] = string.format("%d %s", count, layer)
     end
-    log("startLoadFromXML: %d polygon(s) queued (regions: %s), restoring incrementally", #workItems, table.concat(regionCounts, ", "))
+    log("startLoadFromXML: %d polygon(s) queued (regions: %s), %d layer image(s) found, restoring incrementally", #workItems, table.concat(regionCounts, ", "), #imageFiles)
 end
 
 -- Flushes whatever raw polygons tickLoadFromXML has parsed so far into
 -- the live overlay -- called at least once per tick (bounded batch size,
 -- never the whole dataset at once) and once more at the very end.
 local function flushPendingLoadBatch(state)
+    local restored = state.images ~= nil and state.images.restored or {}
     for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
         if #state.pendingLayers[layer] > 0 then
-            WailaTrailTracer.drawRegionPolygons(layer, state.pendingLayers[layer])
+            -- a layer restored from its image is already complete: the polygons are only stored
+            if not restored[layer] then
+                WailaTrailTracer.drawRegionPolygons(layer, state.pendingLayers[layer])
+            end
             state.pendingLayers[layer] = {}
         end
     end
@@ -2632,7 +2894,9 @@ local function flushPendingLoadBatch(state)
     if not hasAny then
         return
     end
-    WailaTrailTracer.buildTestOverlay(state.pendingByMaterial)
+    if not restored.trail then
+        WailaTrailTracer.buildTestOverlay(state.pendingByMaterial)
+    end
     for _, materialId in ipairs(SPLIT_MATERIALS) do
         state.pendingByMaterial[materialId] = {}
     end
@@ -2659,6 +2923,42 @@ function WailaTrailTracer.tickLoadFromXML()
     end
 
     local tickStart = getTimeSec()
+    -- Hold the restore back until the post-load frames have settled (the game is at its
+    -- slowest right after loading; the same reasoning as the field sweep's startup delay).
+    if state.notBefore == nil then
+        state.notBefore = tickStart + WailaTrailTracer.LOAD_START_DELAY_SEC
+    end
+    if state.imageNotBefore == nil then
+        state.imageNotBefore = tickStart + WailaTrailTracer.IMAGE_LOAD_DELAY_SEC
+    end
+
+    -- Phase 1: the layer images, one layer per frame, after a short settle time. Cheap enough to
+    -- come well before the polygon restore.
+    local images = state.images
+    if images ~= nil and images.index <= #images.queue then
+        if tickStart < state.imageNotBefore then
+            return false
+        end
+        state.phase = "images"
+        local entry = images.queue[images.index]
+        images.index = images.index + 1
+        local t0 = getTimeSec()
+        images.restored[entry.layer] = WailaTrailTracer.restoreLayerImage(entry.layer, entry.path)
+        images.totalMs = (images.totalMs or 0) + (getTimeSec() - t0) * 1000
+        if images.index > #images.queue then
+            local restoredCount = 0
+            for _ in pairs(images.restored) do restoredCount = restoredCount + 1 end
+            log("layer images restored: %d of %d layer(s) in %.0f ms of work", restoredCount, #images.queue, images.totalMs)
+        end
+        return false
+    end
+    state.phase = nil
+
+    -- Phase 2: the polygon store (data for trail linking and rescans; drawn only for layers that
+    -- have no image).
+    if tickStart < state.notBefore then
+        return false
+    end
     -- the load is queued while the game is still loading its mission; time the
     -- restore from its first tick, not from the queueing
     if not state.timingStarted then
@@ -2715,10 +3015,16 @@ function WailaTrailTracer.tickLoadFromXML()
     flushPendingLoadBatch(state)
     -- Same forced-regenerate reasoning as tickWholeMapScan's own
     -- completion -- the last flush could land inside the throttle
-    -- window and never actually show without this.
-    WailaTrailTracer.buildTestOverlay({}, true)
+    -- window and never actually show without this. (Layers restored from an
+    -- image were regenerated when they were adopted.)
+    local restored = state.images ~= nil and state.images.restored or {}
+    if not restored.trail then
+        WailaTrailTracer.buildTestOverlay({}, true)
+    end
     for _, layer in ipairs(WailaTrailTracer.REGION_LAYERS) do
-        WailaTrailTracer.drawRegionPolygons(layer, {}, true)
+        if not restored[layer] then
+            WailaTrailTracer.drawRegionPolygons(layer, {}, true)
+        end
     end
     state.xmlFile:delete()
 
@@ -2729,6 +3035,35 @@ function WailaTrailTracer.tickLoadFromXML()
     log("tickLoadFromXML done: %d polygon(s) restored in %.0fms (%.1fs)", state.polygonCount, elapsedMs, elapsedMs / 1000)
     WailaTrailTracer.loadState = nil
     return true
+end
+
+-- Closes a restore that has not finished (still in its start delay, or part-way): used when a
+-- whole-map scan is about to replace everything anyway, and at teardown.
+function WailaTrailTracer.cancelRestore()
+    local load = WailaTrailTracer.loadState
+    if load == nil then
+        return false
+    end
+    if load.xmlFile ~= nil then
+        load.xmlFile:delete()
+    end
+    WailaTrailTracer.loadState = nil
+    log("restore cancelled before it finished")
+    return true
+end
+
+-- Map teardown (quit, reload) while the budgeted save or restore is still running. The save only
+-- writes its file in the last tick, and the game has already cleared files it did not write
+-- itself, so abandoning it would leave the savegame without the scanned layers: finish it now
+-- (a second at most, and only at exit), the layer images included. A restore in flight is closed.
+function WailaTrailTracer.flushPendingIO()
+    local guard = 0
+    while WailaTrailTracer.saveState ~= nil and guard < 100000 do
+        WailaTrailTracer.tickSaveToXML()
+        guard = guard + 1
+    end
+    WailaTrailTracer.flushImageSave()
+    WailaTrailTracer.cancelRestore()
 end
 
 -- Exposed for WailaLayerScan.lua: a separate file cannot see this chunk's locals.

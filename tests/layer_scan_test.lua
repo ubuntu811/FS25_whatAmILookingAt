@@ -146,4 +146,149 @@ do
     getTerrainHeightAtWorldPos = function() return 100 end
 end
 
+-- A lakebed: worn-looking dirt x, z 8..48; the water covers z >= 28 (mask from the building scan's ray)
+do
+    T.foliageAvailable = function() return true end
+    T.hasFoliageAt = function() return false end
+    T.getLayerCellAt = function(x, z)
+        if x >= 8 and x <= 48 and z >= 8 and z <= 48 then return nil, 1 end
+        return nil, 2
+    end
+    local dry = T.scanLayerChunk(0, 0, 64)
+    local waterMask = {}
+    for row = 0, 31 do
+        waterMask[row] = {}
+        for col = 0, 31 do waterMask[row][col] = (row + 0.5) * 2 >= 28 end
+    end
+    local wet = T.scanLayerChunk(0, 0, 64, waterMask)
+    check("lakebed without a water mask: the whole 40 x 40 pad is a trail", totalArea(dry.trail) > 1400)
+    check("lakebed with a water mask: only the dry half (20 x 40) is left", totalArea(wet.trail) > 600 and totalArea(wet.trail) < 900)
+    local wetLowest = math.huge
+    for _, p in ipairs(wet.trail) do for _, v in ipairs(p) do wetLowest = math.min(wetLowest, -v[2]) end end
+    local maxZ = -math.huge
+    for _, p in ipairs(wet.trail) do for _, v in ipairs(p) do maxZ = math.max(maxZ, v[2]) end end
+    check("no trail polygon reaches into the water (z <= 29)", maxZ <= 29.5)
+    local allWater = {}
+    for row = 0, 31 do allWater[row] = {} for col = 0, 31 do allWater[row][col] = true end end
+    check("a chunk fully under water has no trail", #T.scanLayerChunk(0, 0, 64, allWater).trail == 0)
+end
+
+-- tree probe: a trunk at (842.4, -531.3) on the global 4 m cell grid (origin -2048 for a 4096 m map)
+do
+    local trunkX, trunkZ = 842.4, -531.3
+    overlapBox = function(x, y, z, rx, ry, rz, ex, ey, ez, cb, target, mask)
+        local n = 0
+        if math.abs(trunkX - x) <= ex and math.abs(trunkZ - z) <= ez then
+            n = 1
+            target[cb](target, 900)
+        end
+        return n
+    end
+    local count, cx, cz = T.logTreeProbe(842.19, -531.89)
+    check("tree probe: the 4 m cell holding the point counts the trunk", count == 1)
+    check("tree probe: cell centre sits on the global 4 m grid", (cx + 2048) % 4 == 2 and (cz + 2048) % 4 == 2)
+    local farCount = T.logTreeProbe(900, -400)
+    check("tree probe: an empty spot counts nothing", farCount == 0)
+    overlapBox = nil
+end
+
+-- planted-tree list of the base game's TreePlantManager (growing + split), counted near a point
+do
+    g_treePlantManager = { treesData = {
+        growingTrees = { { node = 1 }, { node = 2 } },
+        splitTrees = { { node = 3 }, { node = 4 } },
+    } }
+    local positions = { [1] = { 100, -50 }, [2] = { 300, 0 }, [3] = { 103, -52 }, [4] = { 500, 500 } }
+    getWorldTranslation = function(node) return positions[node][1], 0, positions[node][2] end
+    entityExists = function() return true end
+    local growing, split, nearby = T.countManagedTreesNear(100, -50, 8)
+    check("manager trees: totals per list", growing == 2 and split == 2)
+    check("manager trees: two of the four are within 8 m of the point", nearby == 2)
+    g_treePlantManager = nil
+    check("manager trees: no manager = nil", T.countManagedTreesNear(0, 0, 8) == nil)
+end
+
+-- tree dots: positions come from the overlap callback, the chunk keeps only its own trees
+do
+    local trunks = { { 10, 10 }, { 10.2, 10.1 }, { 30, 40 }, { 70, 20 }, { -5, 20 } }   -- 2 colliders of one tree, one in range, two outside the chunk
+    getWorldTranslation = function(node) return trunks[node][1], 0, trunks[node][2] end
+    overlapBox = function(x, y, z, rx, ry, rz, ex, ey, ez, cb, target)
+        local n = 0
+        for i, t in ipairs(trunks) do
+            if math.abs(t[1] - x) <= ex and math.abs(t[2] - z) <= ez then
+                n = n + 1
+                target[cb](target, i)
+            end
+        end
+        return n
+    end
+    local count, list, nodes = T.collectTrees(32, 32, 48, true)
+    check("collect: every hit shape has a position", count == 5 and #list == 5)
+    check("collect: distinct node ids are counted", nodes == 5)
+    local trees = T.chunkTrees(list, 0, 0, 64)
+    check("chunk keeps its own trees only (x 70 and x -5 are outside)", #trees == 2)
+    check("two colliders of one tree are one dot (0.5 m merge): 10.0 and 30.0 remain", #trees == 2 and trees[1][1] == 10 and trees[2][1] == 30)
+    local dots = T.treeDots({ { 10, 10 } })
+    check("a dot is a hexagon of the dot radius", #dots == 1 and #dots[1] == 6 and math.abs(math.sqrt((dots[1][1][1] - 10) ^ 2 + (dots[1][1][2] - 10) ^ 2) - T.TREE_DOT_RADIUS) < 1e-9)
+    check("a hexagon covers about 2.6 r^2 (area of a regular hexagon)", math.abs(polygonArea(dots[1]) / (2.598 * T.TREE_DOT_RADIUS ^ 2) - 1) < 0.01)
+    overlapBox = nil
+    local noneCount, noneList = T.collectTrees(0, 0, 10)
+    check("without overlapBox: nothing, no error", noneCount == 0 and #noneList == 0)
+end
+
+-- A capped big query: the engine returns only a few results for a large box. Dots must still
+-- come from the small per-cell queries.
+do
+    local trunks = {}
+    for gx = 12, 52, 8 do
+        for gz = 12, 52, 8 do trunks[#trunks + 1] = { gx, gz } end
+    end                                                         -- 36 trunks, 8 m apart
+    getWorldTranslation = function(node) return trunks[node][1], 0, trunks[node][2] end
+    overlapBox = function(x, y, z, rx, ry, rz, ex, ey, ez, cb, target)
+        local n, cap = 0, (ex > 20) and 3 or math.huge        -- the window query reports 3 shapes at most
+        for i, t in ipairs(trunks) do
+            if n < cap and math.abs(t[1] - x) <= ex and math.abs(t[2] - z) <= ez then
+                n = n + 1
+                target[cb](target, i)
+            end
+        end
+        return n
+    end
+    T.foliageAvailable = function() return false end
+    T.getLayerCellAt = function() return nil, 2 end
+    local capped = T.scanLayerChunk(0, 0, 64)
+    check("capped window query: every one of the 36 trunks is still a dot", capped ~= nil and #capped.trees == 36)
+    check("capped window query: the window reported only its cap, the cells saw all", capped ~= nil and capped.treeShapes == 3 and capped.treeCellShapes >= 36)
+    overlapBox = nil
+end
+
+-- Hillside: the window's centre terrain is at 100 m, a grove stands on a slope 40 m lower. The small
+-- default box (10 m below, 40 m above the centre) cannot see it; the tall window box does.
+do
+    local baseHeight = getTerrainHeightAtWorldPos
+    getTerrainHeightAtWorldPos = function(_, x, _, z) if x > 40 then return 60 end return 100 end
+    local trunks = { { 50, 20 }, { 54, 24 }, { 58, 28 } }                 -- on the low ground, base at y = 60
+    getWorldTranslation = function(node) return trunks[node][1], 60, trunks[node][2] end
+    overlapBox = function(x, y, z, rx, ry, rz, ex, ey, ez, cb, target)
+        local n = 0
+        for i, t in ipairs(trunks) do
+            if math.abs(t[1] - x) <= ex and math.abs(t[2] - z) <= ez and math.abs(60 - y) <= ey then
+                n = n + 1
+                target[cb](target, i)
+            end
+        end
+        return n
+    end
+    local lowBox = T.countTrees(32, 32, 40)
+    check("hillside: the default box centred on the window's terrain misses trees 40 m lower", lowBox == 0)
+    local tallCount = T.collectTrees(32, 32, 40, false, T.TREE_WINDOW_HALF_HEIGHT)
+    check("hillside: the tall window box finds all three", tallCount == 3)
+    T.foliageAvailable = function() return false end
+    T.getLayerCellAt = function() return nil, 2 end
+    local chunk = T.scanLayerChunk(0, 0, 64)
+    check("hillside: the chunk is not skipped as empty, and its trees are dots", chunk ~= nil and #chunk.trees == 3)
+    getTerrainHeightAtWorldPos = baseHeight
+    overlapBox = nil
+end
+
 finish("layer_scan_test")

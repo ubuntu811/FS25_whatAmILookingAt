@@ -9,7 +9,7 @@ local function inRoof(x, z)
     local inB = x >= 10 and x <= 20 and z >= 20 and z <= 40
     return inA or inB
 end
-local nodeFlags = { [500] = CollisionFlag.BUILDING, [501] = CollisionFlag.BUILDING, [600] = CollisionFlag.STATIC_OBJECT }
+local nodeFlags = { [500] = CollisionFlag.BUILDING, [501] = CollisionFlag.BUILDING, [600] = CollisionFlag.STATIC_OBJECT, [700] = CollisionFlag.WATER }
 CollisionFlag.getHasGroupFlagSet = function(node, flag) return bit32.band(nodeFlags[node] or 0, flag) ~= 0 end
 raycastClosest = function(x, y, z, dx, dy, dz, distance, callbackName, target, mask)
     check_mask = mask
@@ -20,7 +20,7 @@ raycastClosest = function(x, y, z, dx, dy, dz, distance, callbackName, target, m
     end
 end
 local polygons = T.scanBuildingChunk(0, 0, 64)
-check("the ray mask is BUILDING | STATIC_OBJECT", check_mask == bit32.bor(CollisionFlag.BUILDING, CollisionFlag.STATIC_OBJECT))
+check("the ray mask is BUILDING | STATIC_OBJECT | WATER", check_mask == bit32.bor(bit32.bor(CollisionFlag.BUILDING, CollisionFlag.STATIC_OBJECT), CollisionFlag.WATER))
 check("one polygon: the L-shaped roof (gap closed, low wall ignored)", #polygons == 1)
 local expected = 30 * 10 + 10 * 20        -- the two wings: 300 + 200
 check("roof area close to the true L (within 12%)", math.abs(polygonArea(polygons[1]) / expected - 1) < 0.12)
@@ -44,4 +44,27 @@ end
 local statics = T.scanBuildingChunk(0, 0, 64)
 check("static warehouse found, fence / pole / low wall ignored: one polygon", #statics == 1)
 check("warehouse area close to 24 x 14 (within 15%)", #statics == 1 and math.abs(polygonArea(statics[1]) / (24 * 14) - 1) < 0.15)
+
+-- water: a pond (plane 0.5 m above the terrain) at x, z 20..40; everywhere else the plane
+-- lies 5 m BELOW the terrain (what every land cell sees) and must not count
+raycastClosest = function(x, y, z, dx, dy, dz, distance, callbackName, target, mask)
+    if x >= 20 and x <= 40 and z >= 20 and z <= 40 then
+        target[callbackName](target, 700, x, 100.5, z)
+    else
+        target[callbackName](target, 700, x, 95, z)
+    end
+end
+local none, water, waterPolys = T.scanBuildingChunk(0, 0, 64)
+check("water: a pond gives a water mask", water ~= nil)
+check("water: cell inside the pond is water", water ~= nil and water[15][15] == true)
+check("water: land cell with the plane below the terrain is not water", water ~= nil and water[2][2] == false)
+check("water: the mask is grown by a cell (pond edge x=20 -> cell 9 is water)", water ~= nil and water[15][9] == true)
+check("water: pond is not a building", #none == 0)
+check("water layer: one polygon for the pond", #waterPolys == 1)
+check("water layer: area about the pond's 20 x 20 m (not the grown mask)", #waterPolys == 1 and math.abs(polygonArea(waterPolys[1]) / 400 - 1) < 0.2)
+raycastClosest = function(x, y, z, dx, dy, dz, distance, callbackName, target, mask)
+    target[callbackName](target, 700, x, 95, z)
+end
+local _, noWater, noWaterPolys = T.scanBuildingChunk(0, 0, 64)
+check("water: a chunk with the plane only below the terrain has no water mask", noWater == nil and #noWaterPolys == 0)
 finish("building_scan_test")
