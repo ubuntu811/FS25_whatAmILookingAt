@@ -87,6 +87,12 @@ function WailaMapLayersTab.getItemColor(item)
     return v.color[1], v.color[2], v.color[3], v.visible and 1 or 0.25
 end
 
+-- Ten-segment opacity meter under the chip: one segment per 10 percent, greyed when hidden.
+function WailaMapLayersTab.getItemMeter(item)
+    local v = WailaMapSettings.get(item.layer)
+    return v.alpha, not v.visible
+end
+
 local function refreshHub(index)
     local hub = WailaDebugHubDialog ~= nil and WailaDebugHubDialog.instance or nil
     if hub ~= nil and hub.refreshItems ~= nil then
@@ -142,12 +148,13 @@ function WailaMapLayersTab.register()
         describeItem = WailaMapLayersTab.describeItem,
         onScroll = WailaMapLayersTab.onScroll,
         getItemColor = WailaMapLayersTab.getItemColor,
+        getItemMeter = WailaMapLayersTab.getItemMeter,
+        getOpacity = function(item) return WailaMapSettings.get(item.layer).alpha end,
+        setOpacity = function(item, value) WailaMapSettings.setAlpha(item.layer, value) end,
         buttons = {
-            { label = "Pick colour", callback = pickColor },
-            { label = "More opaque", callback = function(item) WailaMapSettings.stepAlpha(item.layer, WailaMapSettings.ALPHA_STEP) end },
-            { label = "Less opaque", callback = function(item) WailaMapSettings.stepAlpha(item.layer, -WailaMapSettings.ALPHA_STEP) end },
-            { label = "Show / hide", callback = function(item) WailaMapSettings.setVisible(item.layer, not WailaMapSettings.get(item.layer).visible) end },
-            { label = "Reset", callback = function(item)
+            { label = "Pick colour", instant = true, callback = pickColor },
+            { label = "Show / hide", instant = true, callback = function(item) WailaMapSettings.setVisible(item.layer, not WailaMapSettings.get(item.layer).visible) end },
+            { label = "Reset", instant = true, callback = function(item)
                 WailaMapSettings.reset(item.layer)
                 if g_currentMission ~= nil and g_currentMission.wailaTrailTracer ~= nil then
                     g_currentMission.wailaTrailTracer.recolorOverlays()

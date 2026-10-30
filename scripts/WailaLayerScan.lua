@@ -55,6 +55,9 @@ WailaTrailTracer.LAYER_SCAN_FOREST_TOLERANCE = 2.0
 WailaTrailTracer.LAYER_SCAN_TRAIL_TOLERANCE = 1.0
 -- materials that mean worn ground outside the learned classes (DIRT, GRAVEL)
 local WORN_MATERIALS = { [1] = true, [6] = true }
+function WailaTrailTracer.isWornMaterial(materialId)
+    return WORN_MATERIALS[materialId] == true
+end
 local STONE_MATERIAL = 7
 
 -- Trees: a standing tree has a static collision body with the TREE bit; overlapBox
@@ -804,6 +807,183 @@ function WailaTrailTracer.collectRoadSplineChains()
         end
     end
     return chains
+end
+
+-- The map's own road splines as paths (kind "spline", not saved: rebuilt every session), so the road
+-- follower and anything else that asks the path store finds them next to recorded drives. Done once
+-- per session, on the first request. Each is sampled every 4 m in the spline's own direction.
+WailaTrailTracer.PATH_SPLINE_STEP = 4.0
+function WailaPathStore.importMapSplines()
+    if WailaPathStore.mapSplinesImported then
+        return 0
+    end
+    WailaPathStore.mapSplinesImported = true
+    local count = 0
+    if g_currentMission ~= nil and g_currentMission.aiSystem ~= nil then
+        for spline in pairs(g_currentMission.aiSystem:getRoadSplines()) do
+            local chain = WailaTrailTracer.sampleSplineChain(spline, WailaTrailTracer.PATH_SPLINE_STEP)
+            if chain ~= nil and #chain >= 2 then
+                local id = WailaPathStore.add({
+                    points = chain, kind = "spline", source = "map", name = "road spline",
+                    width = WailaTrailTracer.ROAD_SPLINE_FALLBACK_WIDTH, oneWay = false, transient = true,
+                })
+                if id ~= nil then
+                    count = count + 1
+                end
+            end
+        end
+    end
+    Logging.info("[WhatAmILookingAt] [Paths] imported %d map road spline(s) as paths", count)
+    return count
+end
+
+-- ===== Probe: what are the map's road and traffic splines? =====
+-- Debug (Terrain tab). Answers, from real map data: are the splines one centre-line per road or
+-- one per lane, does their direction mean anything (paired splines running opposite ways), and what
+-- else do the AI and traffic systems hold. Writes <savegame>/wailaSplines.xml (every road spline as a
+-- point list, 5 m apart, in the spline's own direction) and logs the fields and methods of the
+-- engine objects. The game deletes unknown savegame files on its next save, so read it before that.
+WailaTrailTracer.SPLINE_DUMP_STEP = 5.0
+WailaTrailTracer.SPLINE_DUMP_MAX_POINTS = 600
+
+local function describeEngineObject(label, object)
+    if object == nil then
+        log("spline probe: %s is nil", label)
+        return
+    end
+    local fields = {}
+    for key, value in pairs(object) do
+        local kind = type(value)
+        if kind == "table" then
+            local count = 0
+            for _ in pairs(value) do count = count + 1 end
+            kind = "table[" .. count .. "]"
+        end
+        fields[#fields + 1] = tostring(key) .. ":" .. kind
+    end
+    table.sort(fields)
+    log("spline probe: %s fields: %s", label, table.concat(fields, ", "))
+    local meta = getmetatable(object)
+    local class = meta ~= nil and type(meta.__index) == "table" and meta.__index or nil
+    if class ~= nil then
+        local methods = {}
+        for key, value in pairs(class) do
+            if type(value) == "function" then methods[#methods + 1] = tostring(key) end
+        end
+        table.sort(methods)
+        log("spline probe: %s methods (%d): %s", label, #methods, table.concat(methods, ", "))
+    end
+end
+
+local function splinePointsString(spline)
+    local length = getSplineLength(spline)
+    if length == nil or length <= 0 then
+        return nil, length
+    end
+    local step = math.max(WailaTrailTracer.SPLINE_DUMP_STEP, length / WailaTrailTracer.SPLINE_DUMP_MAX_POINTS)
+    local parts = {}
+    for distance = 0, length + step, step do
+        local x, _, z = getSplinePosition(spline, math.min(distance / length, 1))
+        parts[#parts + 1] = string.format("%.1f %.1f", x, z)
+    end
+    return table.concat(parts, " "), length
+end
+
+local function nodeName(node)
+    local ok, name = pcall(getName, node)
+    return ok and tostring(name) or "?"
+end
+
+function WailaTrailTracer.dumpRoadSplines()
+    local mission = g_currentMission
+    if mission == nil or mission.missionInfo == nil or mission.missionInfo.savegameDirectory == nil then
+        log("spline probe: no mission / savegame directory")
+        return
+    end
+    describeEngineObject("aiSystem", mission.aiSystem)
+    describeEngineObject("trafficSystem", mission.trafficSystem)
+
+    -- can a mod make a spline at runtime? (pairs(_G) does not list engine functions, so ask by name)
+    local candidates = {
+        "createSpline", "createSplineNode", "createSplineShape", "loadSplineFromFile", "setSplineCV", "setSplineCVs",
+        "setSplineCVPosition", "addSplineCV", "removeSplineCV", "getSplineCV", "getSplineCVPosition", "getSplineNumOfCV",
+        "getSplineNumCVs", "setSplineClosed", "getIsSplineClosed", "setSplineDirty", "updateSplineBoundingVolume",
+        "getSplineLength", "getSplinePosition", "getSplineOrientation", "getSplineDirection", "getSplineTangent",
+        "createTransformGroup", "loadI3DFile", "loadSharedI3DFile", "link", "delete",
+    }
+    local present, absent = {}, {}
+    for _, name in ipairs(candidates) do
+        if type(_G[name]) == "function" then present[#present + 1] = name else absent[#absent + 1] = name end
+    end
+    log("spline probe: engine functions present: %s", #present > 0 and table.concat(present, ", ") or "none")
+    log("spline probe: not present: %s", table.concat(absent, ", "))
+
+    local path = mission.missionInfo.savegameDirectory .. "/wailaSplines.xml"
+    local xmlFile = XMLFile.create("wailaSplines", path, "wailaSplines")
+    if xmlFile == nil then
+        log("spline probe: XMLFile.create failed for %s", path)
+        return
+    end
+
+    local counts = { ai = 0, other = 0 }
+    local function dumpSpline(group, index, spline, value)
+        local key = string.format("wailaSplines.%s(%d)", group, index)
+        local points, length = splinePointsString(spline)
+        if points == nil then
+            return false
+        end
+        xmlFile:setString(key .. "#id", tostring(spline))
+        xmlFile:setString(key .. "#name", nodeName(spline))
+        local okParent, parent = pcall(getParent, spline)
+        if okParent and parent ~= nil then
+            xmlFile:setString(key .. "#parent", nodeName(parent))
+        end
+        xmlFile:setFloat(key .. "#length", length)
+        xmlFile:setString(key .. "#value", type(value))
+        xmlFile:setString(key .. "#points", points)
+        return true
+    end
+
+    -- the road splines the AI uses (what WAILA reads)
+    local roadSplines = mission.aiSystem ~= nil and mission.aiSystem:getRoadSplines() or {}
+    for spline, value in pairs(roadSplines) do
+        if dumpSpline("aiSpline", counts.ai, spline, value) then
+            counts.ai = counts.ai + 1
+        end
+    end
+
+    -- any table the traffic system holds whose numbers are spline nodes
+    local groups = {}
+    local trafficSystem = mission.trafficSystem
+    if trafficSystem ~= nil then
+        for field, value in pairs(trafficSystem) do
+            if type(value) == "table" then
+                local found = 0
+                local tried = 0
+                for key, entry in pairs(value) do
+                    tried = tried + 1
+                    if tried > 500 then break end
+                    local candidate = type(entry) == "number" and entry or (type(key) == "number" and key or nil)
+                    if candidate ~= nil then
+                        local ok, length = pcall(getSplineLength, candidate)
+                        if ok and type(length) == "number" and length > 0 then
+                            if dumpSpline("trafficSpline", counts.other, candidate, entry) then
+                                counts.other = counts.other + 1
+                                found = found + 1
+                            end
+                        end
+                    end
+                end
+                if found > 0 then
+                    groups[#groups + 1] = tostring(field) .. "=" .. found
+                end
+            end
+        end
+    end
+    xmlFile:save()
+    xmlFile:delete()
+    log("spline probe: %d AI road spline(s), %d spline(s) found in the traffic system (%s); written to %s",
+        counts.ai, counts.other, #groups > 0 and table.concat(groups, ", ") or "no spline table", path)
 end
 
 -- Chains of {x, z} -> ribbon polygons (left edge forward, right edge back),

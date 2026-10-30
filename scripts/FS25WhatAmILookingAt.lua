@@ -90,6 +90,7 @@ function FS25WhatAmILookingAt:setupComponents()
     -- Per-savegame look of the map layers (colours, opacity, visibility); must
     -- be loaded before the tracer restores/draws its overlays below.
     WailaMapSettings.load()
+    WailaPathStore.load()
 
     -- Real GUI screen registration -- g_gui:loadGui(xmlPath, name,
     -- controllerInstance) pairs the layout XML with its Lua controller
@@ -145,7 +146,7 @@ function FS25WhatAmILookingAt:setupComponents()
 
     registerActionTab("general", "General", {
         { getLabel = function() return "Debug logging (all WAILA-aware mods): " .. (WailaConfig.isDebugLog() and "ON" or "OFF") .. " - run to switch" end,
-          run = function() WailaConfig.toggleDebugLog() end },
+          instant = true, run = function() WailaConfig.toggleDebugLog() end },
         { label = "Dump inspected target", run = function() mod:onDumpTarget() end },
         { label = "Dump environment/weather state", run = function() mod:onDumpEnvironment() end },
         { label = "Dump player + held hand tool position", run = function() mod:onDumpPlayerAndHandTool() end },
@@ -157,8 +158,11 @@ function FS25WhatAmILookingAt:setupComponents()
     })
 
     registerActionTab("terrain", "Terrain", {
+        -- the same call as TaskMap's Shift+G key, so the key can be freed up (rebound or cleared) without losing the scan
+        { label = "Scan the whole map (same as Shift+G; progress shows in the HUD)", run = function() WailaTrailTracer.startWholeMapScan() end },
         { label = "Dump terrain layers", run = function() mod:onDumpTerrainLayers() end },
-        { label = "Rescan around me (3 x 3 chunks, 192 m) - same layers and colours as Shift+G", run = function() mod:onRescanAroundMe() end },
+        { label = "Rescan around me (3 x 3 chunks, 192 m) - the same scan as the whole-map one, just this area", run = function() mod:onRescanAroundMe() end },
+        { label = "Probe: road and traffic splines (log + savegame/wailaSplines.xml)", run = function() WailaTrailTracer.dumpRoadSplines() end },
         { label = "Count tree trunks at crosshair (the forest scan's own query)", run = function() mod:onTreeProbe() end },
         { label = "Log terrain layer fingerprint survey (whole map, one-shot)", run = function() WailaTrailTracer.logLayerFingerprintSurvey() end },
         { label = "Build layer-class overlay near player (road orange, forest green)", run = function() mod:onBuildLayerClassOverlay() end },
@@ -222,6 +226,7 @@ function FS25WhatAmILookingAt:setupComponents()
 
     -- Map layers tab: colour / opacity / visibility per layer, see WailaMapLayersTab.lua
     WailaMapLayersTab.register()
+    WailaPathsTab.register()
 
     -- Published via g_currentMission, not the bare Waila global -- a
     -- mod's own declared globals aren't actually visible to OTHER mods'
@@ -250,6 +255,8 @@ function FS25WhatAmILookingAt:setupComponents()
     -- reason (see Waila.lua's own header comment); this one simply never
     -- got the same treatment when it was built.
     g_currentMission.wailaTrailTracer = WailaTrailTracer
+    -- paths (recorded drives, imported roads ...): see WailaPathStore.lua
+    g_currentMission.wailaPaths = WailaPathStore
 
     -- Restores the trail overlay from <savegame>/wailaTrail.xml (if one
     -- exists) -- same spot fieldIndex:start() calls its own loadFromXML
@@ -325,7 +332,7 @@ function FS25WhatAmILookingAt:teardownComponents()
             index:clear()
         end
     end
-    for _, id in ipairs({ "general", "terrain", "foliage", "field", "areas", "maplayers" }) do
+    for _, id in ipairs({ "general", "terrain", "foliage", "field", "areas", "maplayers", "paths" }) do
         Waila.unregisterDebugTab(id)
     end
     if self.debugHubGui ~= nil then
@@ -774,6 +781,9 @@ local function onSavegameControllerSaveComplete(self, errorCode)
         -- savegame folder after the next save), so write them again on every save.
         if WailaMapSettings ~= nil then
             WailaMapSettings.save()
+        end
+        if WailaPathStore ~= nil then
+            WailaPathStore.save()
         end
         WailaTrailTracer.startSaveToXML()
     end

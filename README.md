@@ -63,6 +63,14 @@ Drop `FS25_whatAmILookingAt` into your FS25 mods folder like any other
 mod. Works standalone; ImmersiveWeathering is optional but recommended
 if you want something to point the inspector at.
 
+## Map scan
+
+WAILA can scan any map without knowing it in advance and draw water, forest, single
+trees, trails, roads and buildings on the in-game map (via TaskMap), plus an index of
+every field. Layers are saved as images, so a reload shows them in well under a second.
+How it works, what it reads, how it is saved, the numbers and the gotchas:
+[docs/MAP_SCAN.md](docs/MAP_SCAN.md).
+
 ## Engine API notes
 
 [docs/engine-api/](docs/engine-api/README.md) - reverse-engineered reference

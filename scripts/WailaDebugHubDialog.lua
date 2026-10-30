@@ -81,6 +81,14 @@ function WailaDebugHubDialog:onOpen()
     -- it, so the topic list widget itself still visually remembers its
     -- last selected row across a close/reopen. activeTabIndex defaults
     -- to 1 in .new() anyway, so this is still 1 on the very first open.
+    -- ten opacity steps for the selector (Map layers); the tab maps state N to N / 10
+    if self.opacityOption ~= nil then
+        local texts = {}
+        for i = 1, 10 do
+            texts[i] = string.format("%d%%", i * 10)
+        end
+        self.opacityOption:setTexts(texts)
+    end
     self:setActiveTab(self.activeTabIndex)
 end
 
@@ -176,6 +184,40 @@ function WailaDebugHubDialog:updateActionButtons()
             end
         end
     end
+    self:updateOpacityOption()
+end
+
+-- The arrow selector under the buttons: shown when the active tab can read and set the selected
+-- item's opacity (tab.getOpacity(item) -> 0..1, tab.setOpacity(item, 0..1)).
+function WailaDebugHubDialog:updateOpacityOption()
+    local option = self.opacityOption
+    if option == nil then
+        return
+    end
+    local tab = self:getActiveTab()
+    local item = self.selectedItem
+    local show = tab ~= nil and tab.getOpacity ~= nil and tab.setOpacity ~= nil and item ~= nil
+    option:setVisible(show)
+    if self.opacityTitle ~= nil then
+        self.opacityTitle:setVisible(show)
+    end
+    if show then
+        local state = math.max(1, math.min(10, math.floor(tab.getOpacity(item) * 10 + 0.5)))
+        option:setState(state)
+    end
+end
+
+function WailaDebugHubDialog:onClickOpacityOption(state)
+    local tab = self:getActiveTab()
+    local item = self.selectedItem
+    if tab == nil or tab.setOpacity == nil or item == nil then
+        return
+    end
+    local ok, err = pcall(tab.setOpacity, item, state / 10)
+    if not ok then
+        log("opacity selector on '%s' FAILED: %s", tostring(tab.id), tostring(err))
+    end
+    self:refreshItems(self.itemList ~= nil and self.itemList.selectedIndex or nil)
 end
 
 -- Only the topic list is a datasource-driven SmoothList now -- the item
@@ -227,6 +269,24 @@ function WailaDebugHubDialog:populateCellForItemInSection(list, section, index, 
             a = a or 1
             swatch:setImageColor(nil, r, g, b, a)
             swatch:setImageColor(GuiOverlay.STATE_SELECTED, r, g, b, a)
+        end
+    end
+
+    -- optional ten-segment meter: tab.getItemMeter(item) -> fraction 0..1 (and dim = true to grey it out)
+    local fraction, dim
+    if tab ~= nil and item ~= nil and tab.getItemMeter ~= nil then
+        fraction, dim = tab.getItemMeter(item)
+    end
+    local lit = fraction ~= nil and math.floor(fraction * 10 + 0.5) or 0
+    for i = 1, 10 do
+        local segment = cell:getAttribute("seg" .. i)
+        if segment ~= nil then
+            segment:setVisible(fraction ~= nil)
+            if fraction ~= nil then
+                local level = i <= lit and (dim and 0.45 or 0.85) or 0.22
+                segment:setImageColor(nil, level, level, level, 1)
+                segment:setImageColor(GuiOverlay.STATE_SELECTED, level, level, level, 1)
+            end
         end
     end
 end
@@ -303,8 +363,13 @@ local function runAction(self, index)
         log("click action %d: '%s' callback FAILED: %s", index, tostring(descriptor.label), tostring(err))
     end
 
-    self.doneActionIndex = index
-    self.doneActionUntil = DONE_DISPLAY_MS
+    -- "Done" is for actions whose result is not visible right there (a dump to the log); an action
+    -- that visibly changes the row (colour, hide, reset) marks itself instant and skips it
+    local instant = descriptor.instant == true or (self.selectedItem ~= nil and self.selectedItem.instant == true)
+    if not instant then
+        self.doneActionIndex = index
+        self.doneActionUntil = DONE_DISPLAY_MS
+    end
     self:refreshItems(keepIndex)
 end
 

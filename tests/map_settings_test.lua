@@ -114,4 +114,34 @@ for _ = 1, 20 do Tab.onScroll(items[4], 1) end
 check("wheel up past the top stays at 100%", S.get("trail").alpha == 1)
 local _, scrollText = Tab.describeItem(items[4])
 check("the row says so: opacity ... (scroll)", scrollText:find("%(scroll%)") ~= nil)
+-- opacity meter (ten segments, one per 10 percent) and colour chip
+S.setAlpha("water", 0.7)
+local fraction, dim = Tab.getItemMeter({ layer = "water" })
+check("meter: 70 percent opacity is 0.7, not dimmed", fraction == 0.7 and dim == false)
+S.setVisible("water", false)
+fraction, dim = Tab.getItemMeter({ layer = "water" })
+check("meter: a hidden layer is dimmed", dim == true)
+S.setVisible("water", true)
+S.setAlpha("water", S.MIN_ALPHA)
+check("meter: the lowest opacity still lights one segment", math.floor(Tab.getItemMeter({ layer = "water" }) * 10 + 0.5) == 1)
+local r, g, b, a = Tab.getItemColor({ layer = "forest" })
+check("chip: the layer colour, opaque", r == S.get("forest").color[1] and b == S.get("forest").color[3] and a == 1)
+-- the tab as the hub sees it: arrow selector hooks, instant buttons (no "Done" flash)
+local registered
+Waila = { registerDebugTab = function(descriptor) registered = descriptor end }
+FS25WhatAmILookingAt = { MOD_DIRECTORY = "mod/" }
+Utils = { getFilename = function(name) return name end }
+Tab.register()
+check("tab: opacity selector reads the layer's opacity", registered.getOpacity({ layer = "water" }) == S.get("water").alpha)
+registered.setOpacity({ layer = "water" }, 0.4)
+check("tab: opacity selector sets it", S.get("water").alpha == 0.4)
+registered.setOpacity({ layer = "water" }, 0)
+check("tab: ...never below the floor", S.get("water").alpha == S.MIN_ALPHA)
+local labels, allInstant = {}, true
+for _, button in ipairs(registered.buttons) do
+    labels[#labels + 1] = button.label
+    allInstant = allInstant and button.instant == true
+end
+check("tab: buttons are colour, show/hide, reset (opacity moved to the selector)", table.concat(labels, "|") == "Pick colour|Show / hide|Reset")
+check("tab: all of them are instant, so no Done flash", allInstant)
 finish("map_settings_test")

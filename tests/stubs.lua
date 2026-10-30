@@ -28,6 +28,10 @@ g_terrainNode = 1
 getTerrainHeightAtWorldPos = function() return 100 end
 
 function loadTracer()
+    -- same order as modDesc.xml: the path store comes before the tracer and the layer scan
+    if WailaPathStore == nil then
+        dofile("scripts/WailaPathStore.lua")
+    end
     dofile("scripts/WailaTrailTracer.lua")
     dofile("scripts/WailaLayerScan.lua")
     return WailaTrailTracer

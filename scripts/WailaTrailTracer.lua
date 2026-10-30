@@ -2276,6 +2276,86 @@ function WailaTrailTracer.sampleDrivable(x, z)
     return 0
 end
 
+-- True where the tree layer has a tree dot (a standing trunk, drawn 2.5 m around its position), from the
+-- same bitmap the map shows. For other mods that must keep clear of trees (the road follower).
+local function sampleLayerMap(map, x, z)
+    local size = g_currentMission ~= nil and g_currentMission.terrainSize or nil
+    if map == nil or size == nil then
+        return false
+    end
+    local resolution = WailaTrailTracer.OVERLAY_RESOLUTION
+    local px = math.floor(resolution * (x + size * 0.5) / size)
+    local pz = math.floor(resolution * (z + size * 0.5) / size)
+    if px < 0 or pz < 0 or px >= resolution or pz >= resolution then
+        return false
+    end
+    return getBitVectorMapPoint(map, px, pz, 0, 1) ~= 0
+end
+
+function WailaTrailTracer.sampleTree(x, z)
+    return sampleLayerMap(WailaTrailTracer.treeLayerOverlayMap, x, z)
+end
+
+-- True where the building layer has a building (collision group BUILDING, from the same bitmap the map shows)
+function WailaTrailTracer.sampleBuilding(x, z)
+    return sampleLayerMap(WailaTrailTracer.buildingLayerOverlayMap, x, z)
+end
+
+-- True where the forest layer says forest (both channels of the forest picture)
+function WailaTrailTracer.sampleForest(x, z)
+    local map = WailaTrailTracer.forestOverlayMap
+    local size = g_currentMission ~= nil and g_currentMission.terrainSize or nil
+    if map == nil or size == nil then
+        return false
+    end
+    local resolution = WailaTrailTracer.OVERLAY_RESOLUTION
+    local px = math.floor(resolution * (x + size * 0.5) / size)
+    local pz = math.floor(resolution * (z + size * 0.5) / size)
+    if px < 0 or pz < 0 or px >= resolution or pz >= resolution then
+        return false
+    end
+    return getBitVectorMapPoint(map, px, pz, 0, 2) ~= 0
+end
+
+function WailaTrailTracer.hasForestData()
+    return WailaTrailTracer.forestOverlayMap ~= nil
+end
+
+-- The raw ground at a point, straight from the terrain (not from the pictures): true when its material is worn
+-- ground (dirt or gravel). For diagnostics: where this is true but the trail picture is empty, the scan left it out.
+function WailaTrailTracer.sampleWornMaterial(x, z)
+    local _, materialId = WailaTrailTracer.getLayerCellAt(x, z)
+    return WailaTrailTracer.isWornMaterial(materialId)
+end
+
+-- True where the paint under this exact point is a learned ROAD layer (stone, asphalt): read from the terrain, not from the
+-- pictures, so it is as fine as the terrain's own layers. Shoulders of gravel beside a stone road are not it.
+function WailaTrailTracer.sampleRoadPaint(x, z)
+    if not WailaTrailTracer.layerClassLearned then
+        return false
+    end
+    return WailaTrailTracer.getLayerClassAt(x, z) == WailaTrailTracer.LAYER_CLASS_ROAD
+end
+
+-- True where the ground at this exact point is solid driving ground: a learned ROAD paint, or worn material (dirt, gravel),
+-- from ONE terrain read. The pictures are made of 2 m cells that were closed, filled and curve-fitted, so their edges are
+-- ragged and a metre or two wider than the real track; this is the track at the terrain's own resolution.
+function WailaTrailTracer.sampleSolidGround(x, z)
+    local class, materialId = WailaTrailTracer.getLayerCellAt(x, z)
+    if WailaTrailTracer.layerClassLearned and class == WailaTrailTracer.LAYER_CLASS_ROAD then
+        return true
+    end
+    return WailaTrailTracer.isWornMaterial(materialId)
+end
+
+function WailaTrailTracer.hasBuildingData()
+    return WailaTrailTracer.buildingLayerOverlayMap ~= nil
+end
+
+function WailaTrailTracer.hasTreeData()
+    return WailaTrailTracer.treeLayerOverlayMap ~= nil
+end
+
 -- True once there is any road or trail data to read (scanned this session or restored).
 function WailaTrailTracer.hasDrivableData()
     return WailaTrailTracer.roadLayerOverlayMap ~= nil or WailaTrailTracer.testOverlayMap ~= nil

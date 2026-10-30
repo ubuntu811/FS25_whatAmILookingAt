@@ -48,6 +48,18 @@
                 <!-- colour chip, tinted per row in Lua (setImageColor) by tabs that define
                      getItemColor (Map layers); hidden for every other tab -->
                 <Bitmap profile="waila_hubSwatch" name="swatch"/>
+                <!-- opacity meter under the chip: ten small segments, one per 10 percent, lit in
+                     Lua by tabs that define getItemMeter (Map layers) -->
+                <Bitmap profile="waila_hubMeterSegment" name="seg1" position="-74px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg2" position="-70px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg3" position="-66px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg4" position="-62px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg5" position="-58px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg6" position="-54px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg7" position="-50px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg8" position="-46px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg9" position="-42px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg10" position="-38px -56px"/>
             </ListItem>
         </SmoothList>
         <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
@@ -78,6 +90,10 @@
         <Button profile="waila_hubActionButton" position="0px -440px" id="actionButton4" onClick="onClickAction4" text=""/>
         <Button profile="waila_hubActionButton" position="0px -580px" id="actionButton5" onClick="onClickAction5" text=""/>
         <Button profile="waila_hubActionButton" position="0px -720px" id="actionButton6" onClick="onClickAction6" text=""/>
+        <!-- Opacity selector (base-game arrow selector, left arrow / value / right arrow), shown by
+             tabs that define getOpacity / setOpacity (Map layers), in the fourth button slot, as wide as the buttons, its title indented to where their labels start -->
+        <Text profile="waila_hubOpacityTitle" id="opacityTitle" position="53px -445px" text="OPACITY"/>
+        <MultiTextOption profile="waila_hubOpacityOption" id="opacityOption" onClick="onClickOpacityOption" position="0px -480px"/>
     </GuiElement>
 
     <BoxLayout profile="fs25_buttonBox" id="buttonsPanel">
@@ -139,9 +155,22 @@
             <position value="-38px 30px"/>
             <textAlignment value="right"/>
         </Profile>
+        <Profile name="waila_hubOpacityTitle" extends="textDefault" with="anchorTopLeft">
+            <size value="90% 30px"/>
+            <textBold value="true"/>
+        </Profile>
+        <Profile name="waila_hubOpacityOption" extends="fs25_settingsMultiTextOption" with="anchorTopLeft">
+            <size value="90% 42px"/>
+            <wrap value="false"/>
+        </Profile>
+        <Profile name="waila_hubMeterSegment" extends="baseReference" with="anchorTopRight">
+            <size value="3px 5px"/>
+            <imageSliceId value="gui.colorPreset"/>
+            <imageColor value="0.22 0.22 0.22 1"/>
+        </Profile>
         <Profile name="waila_hubSwatch" extends="baseReference" with="anchorTopRight">
-            <size value="52px 52px"/>
-            <position value="-38px -14px"/>
+            <size value="40px 40px"/>
+            <position value="-38px -12px"/>
             <imageSliceId value="gui.colorPreset"/>
             <imageColor value="1 1 1 1"/>
         </Profile>
