@@ -179,6 +179,98 @@ local function polygonCentroid(polygon)
     return sumX / count, sumZ / count
 end
 
+-- The pole of inaccessibility: the point inside a polygon that is farthest from every edge (the middle of the widest part: a bent strip gets its label ON the strip, an L on
+-- its fat leg, not at a centroid that may lie outside). The cell-subdivision search of the polylabel method: cover the bounding box with square cells, keep the one whose centre is
+-- best, split only the cells that could still beat it by more than LABEL_PRECISION_METERS. At most LABEL_MAX_CELLS cells are looked at (each costs one pass over the polygon's
+-- edges: about 150 on an average field, 440 at most), so it is bounded work whatever the shape; the best cell so far is returned when the budget ends.
+local LABEL_PRECISION_METERS = 4.0
+local LABEL_MAX_CELLS = 120
+WailaFieldGridScanner.lastLabelCells = 0
+
+local function signedDistanceToPolygon(vertices, px, pz)
+    local inside, minSq = false, math.huge
+    local n = #vertices / 2
+    local j = n
+    for i = 1, n do
+        local ax, az, bx, bz = vertices[2 * i - 1], vertices[2 * i], vertices[2 * j - 1], vertices[2 * j]
+        if (az > pz) ~= (bz > pz) and px < (bx - ax) * (pz - az) / (bz - az) + ax then
+            inside = not inside
+        end
+        local dx, dz = bx - ax, bz - az
+        local t = 0
+        if dx ~= 0 or dz ~= 0 then
+            t = ((px - ax) * dx + (pz - az) * dz) / (dx * dx + dz * dz)
+            t = t < 0 and 0 or (t > 1 and 1 or t)
+        end
+        local ex, ez = px - (ax + dx * t), pz - (az + dz * t)
+        local sq = ex * ex + ez * ez
+        if sq < minSq then
+            minSq = sq
+        end
+        j = i
+    end
+    local d = math.sqrt(minSq)
+    return inside and d or -d
+end
+
+-- Returns x, z (inside the polygon, farthest from its edges), or nil when the polygon is unusable.
+function WailaFieldGridScanner.poleOfInaccessibility(polygon)
+    local vertices = polygon ~= nil and WailaUtil.safeCall(nil, polygon.getVertices, polygon) or nil
+    if vertices == nil or #vertices < 6 then
+        return nil
+    end
+    local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+    for i = 1, #vertices, 2 do
+        minX, maxX = math.min(minX, vertices[i]), math.max(maxX, vertices[i])
+        minZ, maxZ = math.min(minZ, vertices[i + 1]), math.max(maxZ, vertices[i + 1])
+    end
+    local size = math.min(maxX - minX, maxZ - minZ)
+    if size <= 0 then
+        return nil
+    end
+    local cells, examined = {}, 0
+    local function newCell(x, z, h)
+        examined = examined + 1
+        local d = signedDistanceToPolygon(vertices, x, z)
+        return { x = x, z = z, h = h, d = d, bound = d + h * 1.4142 }
+    end
+    local h = size / 2
+    for x = minX, maxX - 1e-6, size do
+        for z = minZ, maxZ - 1e-6, size do
+            cells[#cells + 1] = newCell(x + h, z + h, h)
+        end
+    end
+    local best = newCell((minX + maxX) / 2, (minZ + maxZ) / 2, 0)
+    for _, cell in ipairs(cells) do
+        if cell.d > best.d then
+            best = cell
+        end
+    end
+    while #cells > 0 and examined < LABEL_MAX_CELLS do
+        local top = 1
+        for i = 2, #cells do
+            if cells[i].bound > cells[top].bound then
+                top = i
+            end
+        end
+        local cell = table.remove(cells, top)
+        if cell.d > best.d then
+            best = cell
+        end
+        if cell.bound - best.d > LABEL_PRECISION_METERS then
+            local half = cell.h / 2
+            for _, offset in ipairs({ { -half, -half }, { half, -half }, { -half, half }, { half, half } }) do
+                cells[#cells + 1] = newCell(cell.x + offset[1], cell.z + offset[2], half)
+            end
+        end
+    end
+    WailaFieldGridScanner.lastLabelCells = examined
+    if best.d <= 0 then
+        return nil
+    end
+    return best.x, best.z
+end
+
 -- Meters -- how far to shrink the polygon inward before placing the label,
 -- so it sits with real clearance from the field's own edges instead of
 -- possibly landing right up against one (confirmed live: a label right at
@@ -201,6 +293,11 @@ local LABEL_INSET_METERS = 8
 -- on raw density-traced {x,z} points without creating throwaway nodes for
 -- every boundary vertex just to call it.
 local function computeInteriorPoint(polygon, fallbackX, fallbackZ)
+    local px, pz = WailaFieldGridScanner.poleOfInaccessibility(polygon)
+    if px ~= nil then
+        return px, pz
+    end
+    -- (no usable outline for the search: the older way)
     local offsetPolygon = WailaUtil.safeCall(nil, polygon.getOffsetPolygon, polygon, LABEL_INSET_METERS)
     if offsetPolygon ~= nil then
         local cx, cz = polygonCentroid(offsetPolygon)

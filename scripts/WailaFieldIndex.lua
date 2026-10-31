@@ -358,6 +358,101 @@ function WailaFieldIndex:advanceBlobRescans()
     self:finishBlobRescan(job, { self.scanner:finishBlobScan(job.tracer, job.x, job.z) })
 end
 
+-- Does `entry` lie completely inside `boundary`? Its sample point first (one test, almost always the end of it), then its outline's vertices (at most maxVertices of them, evenly
+-- spaced: nil = all). An entry without an outline (old cache) counts by its sample point alone.
+function WailaFieldIndex.isEntryInside(entry, boundary, maxVertices)
+    if not WailaUtil.getIsPosInsidePolygon(boundary, entry.sampleX, entry.sampleZ) then
+        return false
+    end
+    if entry.boundary == nil then
+        return true
+    end
+    local vertices = entry.boundary:getVertices()
+    local count = #vertices / 2
+    local step = 1
+    if maxVertices ~= nil and count > maxVertices then
+        step = count / maxVertices
+    end
+    local v = 1
+    while v <= count do
+        local index = math.floor(v)
+        if not WailaUtil.getIsPosInsidePolygon(boundary, vertices[2 * index - 1], vertices[2 * index]) then
+            return false
+        end
+        v = v + step
+    end
+    return true
+end
+
+-- The saved labels were set when each field was registered (often mid-creation, or by the centroid rule): one entry per call gets the label of its outline's pole.
+function WailaFieldIndex:relabelStep()
+    if self.relabelNext == nil then
+        return
+    end
+    local entry = self.entries ~= nil and self.entries[self.relabelNext] or nil
+    if entry == nil then
+        self.relabelNext = nil
+        return
+    end
+    if entry.boundary ~= nil then
+        local labelX, labelZ = WailaFieldGridScanner.poleOfInaccessibility(entry.boundary)
+        if labelX ~= nil then
+            entry.labelX, entry.labelZ = labelX, labelZ
+        end
+    end
+    self.relabelNext = self.relabelNext + 1
+end
+
+-- The saved field list of a session in which a field was plowed bit by bit holds every piece AND the field they became (see removeSwallowedEntries): drops each entry that lies
+-- completely inside another one. Of identical outlines the first stays. Returns the number dropped. Cheap: one point test per pair, the outline vertices (16 of them) only when that
+-- passes.
+WailaFieldIndex.DEDUPE_VERTICES = 16
+function WailaFieldIndex.dropContainedEntries(entries)
+    local dropped, gone = 0, {}
+    for i = 1, #entries do
+        for j = 1, #entries do
+            if i ~= j and not gone[j] and entries[j].boundary ~= nil and WailaFieldIndex.isEntryInside(entries[i], entries[j].boundary, WailaFieldIndex.DEDUPE_VERTICES) then
+                gone[i] = true
+                dropped = dropped + 1
+                break
+            end
+        end
+    end
+    if dropped > 0 then
+        local kept = {}
+        for i, entry in ipairs(entries) do
+            if not gone[i] then
+                kept[#kept + 1] = entry
+            end
+        end
+        for i = #entries, 1, -1 do
+            entries[i] = kept[i]
+        end
+    end
+    return dropped
+end
+
+-- A rescan traced `boundary`: every OTHER entry that lies completely inside it is part of this field now (earlier pieces of ground that was plowed bit by bit, each first
+-- registered as a field of its own) and is removed -- otherwise each piece keeps its own entry and every task label (TaskMap) is drawn once per piece. An entry without a boundary
+-- (restored from an old cache, not traced yet) counts when its sample point is inside. Returns the number removed.
+function WailaFieldIndex:removeSwallowedEntries(boundary, keep)
+    if boundary == nil or self.entries == nil then
+        return 0
+    end
+    local removed = 0
+    for i = #self.entries, 1, -1 do
+        local other = self.entries[i]
+        if other ~= keep then
+            local swallowed = WailaFieldIndex.isEntryInside(other, boundary)
+            if swallowed then
+                table.remove(self.entries, i)
+                removed = removed + 1
+            end
+        end
+    end
+    return removed
+end
+
 -- result: the packed finishBlobScan values, or nil when the start point is
 -- no longer field ground. Patches self.entries in place (replace/add/remove)
 -- and fires VEHICLE_LEFT_FIELD with whatever entry resulted (nil if the
@@ -379,18 +474,17 @@ function WailaFieldIndex:finishBlobRescan(job, result)
     else
         local entry = self:buildEntry(labelX, labelZ, sampleX, sampleZ, riceField, boundary)
         if existingIndex ~= nil then
-            -- Keep the OLD labelX/labelZ -- the rescan anchors its own
-            -- label pick to wherever ITS trace started (the vehicle's
-            -- exit point), not the blob's stable full-sweep-order
-            -- position -- overwriting it would make the label hop around
-            -- every time a vehicle happens to leave from a different spot.
-            entry.labelX = self.entries[existingIndex].labelX
-            entry.labelZ = self.entries[existingIndex].labelZ
+            -- The label is the pole of inaccessibility of the traced outline (WailaFieldGridScanner.poleOfInaccessibility): a function of the shape alone, so it no longer
+            -- depends on where the vehicle left the field, and it follows the field as it grows (a label kept from the day the field was a first strip sat off-centre for good).
             self.entries[existingIndex] = entry
         else
             table.insert(self.entries, entry)
         end
         resultEntry = entry
+        local swallowed = self:removeSwallowedEntries(boundary, entry)
+        if swallowed > 0 then
+            log(string.format("[WailaFieldIndex] rescan: %d earlier field entr%s lay inside the field just traced and %s merged into it", swallowed, swallowed == 1 and "y" or "ies", swallowed == 1 and "was" or "were"))
+        end
         -- a field that had no entry when it was queued is now known by id
         self.blobRescanAt[entry.wailaFieldId] = job.startedAt
     end
@@ -753,6 +847,11 @@ function WailaFieldIndex:loadFromXML()
 
     xmlFile:delete()
 
+    local dropped = WailaFieldIndex.dropContainedEntries(entries)
+    if dropped > 0 then
+        log(string.format("[WailaFieldIndex] saved field list: %d entr%s lay inside another field (pieces of a field plowed bit by bit) and %s dropped", dropped, dropped == 1 and "y" or "ies", dropped == 1 and "was" or "were"))
+    end
+
     self.entries = entries
     self.needsInitialRefresh = #entries > 0
     self.cacheTrusted = WailaFieldIndex.isCacheUsable(entries)
@@ -828,7 +927,10 @@ function WailaFieldIndex:update(dt)
         end
     end
 
+    self:relabelStep()
+
     if self.needsInitialRefresh then
+        self.relabelNext = 1
         self.needsInitialRefresh = false
         for _, entry in ipairs(self.entries) do
             entry.field = self.fieldInspector:inspectPoint(entry.sampleX, 0, entry.sampleZ)

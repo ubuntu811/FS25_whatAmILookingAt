@@ -125,4 +125,76 @@ check("rescan: ... but the event still fires with the known entry", #published =
 now = 2000 + WailaFieldIndex.BLOB_RESCAN_COOLDOWN_SEC + 1
 index:rescanBlobAt("tractor", 180, 0)
 check("rescan: after the cooldown it is queued again", #index.blobQueue == 1)
+
+-- ground plowed bit by bit: the pieces that end up inside a later, bigger trace are merged into it (one entry per field, so TaskMap draws one label)
+local function boundaryOf(x1, z1, x2, z2)
+    local boundary = Polygon2D.new(nil, { x1, z1, x2, z1, x2, z2, x1, z2 })
+    return boundary
+end
+local function entryOf(id, x1, z1, x2, z2)
+    return { wailaFieldId = id, sampleX = (x1 + x2) / 2, sampleZ = (z1 + z2) / 2, labelX = (x1 + x2) / 2, labelZ = (z1 + z2) / 2, boundary = boundaryOf(x1, z1, x2, z2) }
+end
+local pieces = setmetatable({
+    entries = { entryOf(1, 0, 0, 40, 40), entryOf(2, 50, 0, 90, 40), entryOf(3, 0, 50, 40, 90), entryOf(4, 300, 300, 340, 340) },
+    blobQueue = {}, blobRescanAt = {}, nextWailaFieldId = 5, vehicleFieldState = {},
+    fieldInspector = { inspectPoint = function() return {} end },
+}, { __index = WailaFieldIndex })
+published = {}
+-- a rescan at (20, 20) traces one big field 0..100 that contains pieces 1, 2 and 3 (piece 4 is far away, a different field)
+pieces:finishBlobRescan({ x = 20, z = 20, startedAt = 1, entity = "tractor" }, { 50, 50, 50, 50, 10000, nil, boundaryOf(0, 0, 100, 100) })
+check("rescan: the pieces inside the new trace are merged into it, a far field is left alone", #pieces.entries == 2)
+local keptFar = false
+for _, e in ipairs(pieces.entries) do if e.wailaFieldId == 4 then keptFar = true end end
+check("rescan: ... the far field keeps its entry, the new one is the big field", keptFar and pieces.entries[1].boundary:getArea() > 9000 or (pieces.entries[2] ~= nil and pieces.entries[2].boundary:getArea() > 9000))
+check("rescan: the leave event carries the merged entry", #published == 1 and published[1].entry ~= nil and published[1].entry.boundary:getArea() > 9000)
+-- an entry that only partly lies inside is not swallowed (two fields that touch)
+local touching = setmetatable({
+    entries = { entryOf(1, 80, 0, 140, 40) }, blobQueue = {}, blobRescanAt = {}, nextWailaFieldId = 2, vehicleFieldState = {},
+    fieldInspector = { inspectPoint = function() return {} end },
+}, { __index = WailaFieldIndex })
+touching:finishBlobRescan({ x = 20, z = 20, startedAt = 1, entity = "tractor" }, { 50, 50, 50, 50, 10000, nil, boundaryOf(0, 0, 100, 100) })
+check("rescan: a field that only partly lies inside the new trace stays", #touching.entries == 2)
+-- an entry with no boundary (old cache) counts by its sample point
+local cached = setmetatable({
+    entries = { { wailaFieldId = 1, sampleX = 30, sampleZ = 30, labelX = 30, labelZ = 30 } }, blobQueue = {}, blobRescanAt = {}, nextWailaFieldId = 2, vehicleFieldState = {},
+    fieldInspector = { inspectPoint = function() return {} end },
+}, { __index = WailaFieldIndex })
+cached:finishBlobRescan({ x = 60, z = 60, startedAt = 1, entity = "tractor" }, { 50, 50, 50, 50, 10000, nil, boundaryOf(0, 0, 100, 100) })
+check("rescan: an old cache entry without a boundary is merged by its sample point", #cached.entries == 1)
+
+
+-- the saved list of such a session: pieces AND the field they became (identical outlines are not this function's business: the cache check on shared sample points catches those)
+local saved = { entryOf(1, 0, 0, 40, 40), entryOf(2, 50, 0, 90, 40), entryOf(3, 0, 0, 100, 100), entryOf(4, 300, 300, 340, 340), entryOf(5, 80, 0, 140, 40) }
+local dropped = WailaFieldIndex.dropContainedEntries(saved)
+local ids = {}
+for _, e in ipairs(saved) do ids[#ids + 1] = e.wailaFieldId end
+check("load: the pieces inside a bigger entry are dropped; a far field and a partly overlapping one stay (in order)", dropped == 2 and table.concat(ids, ",") == "3,4,5")
+check("load: nothing to drop leaves the list alone", WailaFieldIndex.dropContainedEntries({ entryOf(1, 0, 0, 40, 40), entryOf(2, 100, 0, 140, 40) }) == 0)
+
+
+-- labels: the pole of inaccessibility (farthest from every edge), bounded work
+local function near(x, z, ex, ez, tol) return x ~= nil and math.abs(x - ex) <= tol and math.abs(z - ez) <= tol end
+local rectLX, rectLZ = WailaFieldGridScanner.poleOfInaccessibility(boundaryOf(0, 0, 100, 40))
+check("label: a rectangle's pole is its middle (the widest point: any point on the middle line is as good, so z = 20 and x anywhere clear of the ends)", rectLX ~= nil and math.abs(rectLZ - 20) <= 4 and rectLX > 18 and rectLX < 82)
+-- an L: a fat leg (60 x 60) and a thin arm (60 x 10): the label belongs on the fat leg, a centroid would be near the corner / outside for thin bends
+local lShape = Polygon2D.new(nil, { 0, 0, 60, 0, 60, 10, 10, 10, 10, 60, 60, 60, 60, 70, 0, 70 })
+local lx, lz = WailaFieldGridScanner.poleOfInaccessibility(lShape)
+check("label: a C shaped field (10 m thick, a centroid would be in the empty middle): the point is on the ground", lx ~= nil and lShape:getIsPosInside(lx, lz) and not lShape:getIsPosInside(40, 35) and (lx < 10 or lz < 10 or lz > 60))
+-- a bent strip 8 m wide (like the plowed track): the label is ON the strip
+local strip = Polygon2D.new(nil, { 0, 0, 100, 0, 100, 100, 92, 100, 92, 8, 0, 8 })
+local sx, sz = WailaFieldGridScanner.poleOfInaccessibility(strip)
+check("label: a bent 8 m strip: the label is on the strip (a centroid is in the empty corner)", sx ~= nil and strip:getIsPosInside(sx, sz))
+check("label: bounded: at most 120 cells looked at, even for an awkward shape", WailaFieldGridScanner.lastLabelCells <= 125)
+check("label: an unusable polygon (too few points) gives nil, not an error", WailaFieldGridScanner.poleOfInaccessibility(Polygon2D.new(nil, { 0, 0, 1, 1 })) == nil and WailaFieldGridScanner.poleOfInaccessibility(nil) == nil)
+-- a saved entry gets re-labelled one per tick, and the label follows a rescan
+local relabel = setmetatable({ entries = { entryOf(1, 0, 0, 100, 40), entryOf(2, 200, 0, 220, 20) }, relabelNext = 1, needsInitialRefresh = false, blobQueue = {}, vehicleCheckTimer = 0 }, { __index = WailaFieldIndex })
+relabel.entries[1].labelX, relabel.entries[1].labelZ = 5, 5               -- a label from the day the field was a first strip
+relabel.entries[2].labelX, relabel.entries[2].labelZ = 205, 5
+relabel:relabelStep()
+check("label: the load pass re-labels one entry per call, the pole of its outline", near(relabel.entries[1].labelX, relabel.entries[1].labelZ, 50, 20, 32) and math.abs(relabel.entries[1].labelZ - 20) <= 1.5
+    and relabel.entries[2].labelX == 205 and relabel.relabelNext == 2)
+relabel:relabelStep()
+relabel:relabelStep()
+check("label: ... and the second, then the pass ends", near(relabel.entries[2].labelX, relabel.entries[2].labelZ, 210, 10, 1.5) and relabel.relabelNext == nil)
+
 finish("field_scan_test")
