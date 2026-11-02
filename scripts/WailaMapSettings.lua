@@ -51,10 +51,6 @@ function WailaMapSettings.get(layer)
     return values[layer]
 end
 
-function WailaMapSettings.getDefault(layer)
-    return DEFAULTS[layer]
-end
-
 function WailaMapSettings.isDefault(layer)
     local v, d = values[layer], DEFAULTS[layer]
     return v.alpha == d.alpha and v.visible == d.visible
