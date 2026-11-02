@@ -343,9 +343,21 @@ function WailaHud:drawMini(inspection, perf)
         )
     end
 
-    setTextColor(1, 1, 1, 1)
+    -- An attachment point in sight (FS25_WinchTow publishes winchTow.look: the joint within 0.35 m of the view ray, 6 m at most, in words: its type, its height, what fits it) replaces the
+    -- summary: the joints are not solid, so the ray that WAILA inspects goes through them. Asked at most five times a second by WinchTow itself. Without that mod nothing changes.
+    local winchTow = g_currentMission ~= nil and g_currentMission.winchTow or nil
+    local jointText = nil
+    if winchTow ~= nil and winchTow.look ~= nil then
+        local ok, text = pcall(winchTow.look)
+        jointText = ok and text or nil
+    end
+    if jointText ~= nil then
+        setTextColor(0.55, 0.95, 0.55, 1)
+    else
+        setTextColor(1, 1, 1, 1)
+    end
     local summary = self:truncateToWidth(
-        self:getMiniSummary(inspection),
+        jointText or self:getMiniSummary(inspection),
         self.miniValueSize,
         self.miniWidth - 0.016
     )
@@ -507,6 +519,18 @@ function WailaHud:draw(inspection, areaSize, areaStep)
         -- "decoFoliage" with no level while the summary below correctly
         -- shows "decoFoliage L9" for the exact same point.
         targetKind = string.format("foliage (%s(%s)[%s])", foliagePoint[1].name, tostring(foliagePoint[1].density), foliagePoint[1].kind or "unknown")
+    end
+
+    -- An attachment point in sight (FS25_WinchTow, see drawMini): the joint is not solid, so the ray went through it; its details get a section of their own, above the target.
+    local winchTow = g_currentMission ~= nil and g_currentMission.winchTow or nil
+    if winchTow ~= nil and winchTow.lookLines ~= nil then
+        local ok, jointLines = pcall(winchTow.lookLines)
+        if ok and jointLines ~= nil then
+            self:addLine(lines, "Attachment point in sight", true, true)
+            for _, line in ipairs(jointLines) do
+                self:addLine(lines, line)
+            end
+        end
     end
 
     self:addLine(lines, string.format("Target: %s", targetKind), true, true)
