@@ -70,53 +70,6 @@ check("removing twice is harmless", P.remove(c) == false)
 local afterRemove = P.findNear(5, 0, 2)
 check("a removed path is no longer found", #afterRemove == 1 and afterRemove[1].id == a)
 
--- simplify
-local straight = {}
-for i = 0, 50 do straight[#straight + 1] = { i * 2, 0.1 * ((i % 2 == 0) and 1 or -1) } end
-local simple = P.simplify(straight, 0.5)
-check("a straight line with 10 cm noise collapses to its two ends", #simple == 2)
-local ell = {}
-for i = 0, 20 do ell[#ell + 1] = { i * 2, 0 } end
-for i = 1, 20 do ell[#ell + 1] = { 40, i * 2 } end
-local ellSimple = P.simplify(ell, 0.5)
-check("an L keeps its corner (3 points)", #ellSimple == 3 and ellSimple[2][1] == 40 and ellSimple[2][2] == 0)
-local arcPoints = {}
-for i = 0, 40 do local t = i * 2 / 40; arcPoints[#arcPoints + 1] = { 40 * math.sin(t), 40 * (1 - math.cos(t)) } end
-local arcSimple = P.simplify(arcPoints, 0.5)
-check("a bend keeps a few points, fewer than it had, within the tolerance", #arcSimple > 3 and #arcSimple < #arcPoints)
-local worst = 0
-for _, p in ipairs(arcPoints) do
-    local nearest = math.huge
-    for i = 1, #arcSimple - 1 do
-        local ax, az, bx, bz = arcSimple[i][1], arcSimple[i][2], arcSimple[i + 1][1], arcSimple[i + 1][2]
-        local dx, dz = bx - ax, bz - az
-        local t = math.max(0, math.min(1, ((p[1] - ax) * dx + (p[2] - az) * dz) / (dx * dx + dz * dz)))
-        nearest = math.min(nearest, math.sqrt((p[1] - ax - dx * t) ^ 2 + (p[2] - az - dz * t) ^ 2))
-    end
-    worst = math.max(worst, nearest)
-end
-check("...and no original point is further than 0.5 m from the simplified line", worst <= 0.5 + 1e-6)
-
--- recording a drive
-P.clear()
-local recorder = P.newRecorder({ source = "RoadFollow", name = "lane east" })
-local accepted = 0
-for x = 0, 100, 0.5 do if recorder:addPoint(x, 0.05 * math.sin(x)) then accepted = accepted + 1 end end
-check("points closer than 2 m apart are skipped", accepted >= 50 and accepted <= 52)
-check("the recording knows its length", near(recorder:getLength(), 100, 3))
-local id = recorder:finish()
-check("finishing stores one path", id == 1 and P.count() == 1)
-local recorded = P.get(id)
-check("it is simplified (a near-straight drive is a few points), one way, tagged", #recorded.points <= 4 and recorded.oneWay == true and recorded.source == "RoadFollow" and recorded.kind == "recorded")
-local tooShort = P.newRecorder()
-tooShort:addPoint(0, 0) tooShort:addPoint(4, 0)
-local rid, reason = tooShort:finish()
-check("a 4 m drive is not a path", rid == nil and reason == "too short" and P.count() == 1)
-local cancelled = P.newRecorder()
-for x = 0, 50, 2 do cancelled:addPoint(x, 0) end
-cancelled:cancel()
-check("a cancelled recording stores nothing", cancelled:finish() == nil and P.count() == 1)
-
 -- the file
 P.clear()
 local one = P.add({ points = { { 0, 0 }, { 50.123, 0.5 }, { 120, 30 } }, kind = "imported", source = "TerraFarm", name = "a <b> & c", width = 7.5, oneWay = false })

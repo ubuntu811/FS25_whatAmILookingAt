@@ -37,7 +37,6 @@
         <sourceFile filename="scripts/WailaMapSettings.lua" />
         <sourceFile filename="scripts/WailaMapLayersTab.lua" />
         <sourceFile filename="scripts/WailaPathStore.lua" />
-        <sourceFile filename="scripts/WailaPathsTab.lua" />
         <sourceFile filename="scripts/WailaTrailTracer.lua" />
         <sourceFile filename="scripts/WailaLayerScan.lua" />
         <sourceFile filename="scripts/WailaFieldIndex.lua" />

@@ -226,7 +226,6 @@ function FS25WhatAmILookingAt:setupComponents()
 
     -- Map layers tab: colour / opacity / visibility per layer, see WailaMapLayersTab.lua
     WailaMapLayersTab.register()
-    WailaPathsTab.register()
 
     -- Published via g_currentMission, not the bare Waila global -- a
     -- mod's own declared globals aren't actually visible to OTHER mods'

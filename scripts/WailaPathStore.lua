@@ -2,7 +2,7 @@
     WailaPathStore.lua
 
     Paths: polylines on the map that mean "vehicles drive here", with a width, an optional direction
-    and where they came from. One neutral store for every source (a recorded drive, TerraFarm's road
+    and where they came from. One neutral store for every source (TerraFarm's road
     areas, the map's own splines, centre-lines derived from the scan) and every consumer (a map
     overlay, a road follower, a router). Published through g_currentMission.wailaPaths.
 
@@ -19,9 +19,6 @@ WailaPathStore = {}
 
 WailaPathStore.FILENAME = "wailaPaths.xml"
 WailaPathStore.BUCKET_SIZE = 64
-WailaPathStore.SIMPLIFY_TOLERANCE = 0.5     -- metres a recorded line may deviate from the original
-WailaPathStore.RECORD_SPACING = 2.0         -- metres between recorded points
-WailaPathStore.MIN_RECORDED_LENGTH = 10.0   -- a recording shorter than this is not a path
 
 local function log(formatString, ...)
     Logging.info("[WhatAmILookingAt] [Paths] " .. formatString, ...)
@@ -71,51 +68,6 @@ function WailaPathStore.length(points)
         total = total + math.sqrt(dx * dx + dz * dz)
     end
     return total
-end
-
--- Douglas-Peucker, iterative (no recursion depth to worry about on a long drive)
-function WailaPathStore.simplify(points, tolerance)
-    local n = #points
-    if n <= 2 then
-        local copy = {}
-        for i, p in ipairs(points) do copy[i] = { p[1], p[2] } end
-        return copy
-    end
-    local keep = { [1] = true, [n] = true }
-    local stack = { { 1, n } }
-    while #stack > 0 do
-        local range = table.remove(stack)
-        local first, last = range[1], range[2]
-        local ax, az = points[first][1], points[first][2]
-        local bx, bz = points[last][1], points[last][2]
-        local dx, dz = bx - ax, bz - az
-        local lengthSq = dx * dx + dz * dz
-        local worst, worstIndex = 0, nil
-        for i = first + 1, last - 1 do
-            local px, pz = points[i][1] - ax, points[i][2] - az
-            local distance
-            if lengthSq < 1e-9 then
-                distance = math.sqrt(px * px + pz * pz)
-            else
-                distance = math.abs(px * dz - pz * dx) / math.sqrt(lengthSq)
-            end
-            if distance > worst then
-                worst, worstIndex = distance, i
-            end
-        end
-        if worstIndex ~= nil and worst > tolerance then
-            keep[worstIndex] = true
-            stack[#stack + 1] = { first, worstIndex }
-            stack[#stack + 1] = { worstIndex, last }
-        end
-    end
-    local out = {}
-    for i = 1, n do
-        if keep[i] then
-            out[#out + 1] = { points[i][1], points[i][2] }
-        end
-    end
-    return out
 end
 
 -- ===== the store =====
@@ -242,65 +194,6 @@ function WailaPathStore.findNear(x, z, radius)
         return a.id < b.id
     end)
     return hits
-end
-
--- ===== recording a drive =====
--- recorder = WailaPathStore.newRecorder({ kind, source, name, width, oneWay })
--- recorder:addPoint(x, z) as often as you like (points closer than RECORD_SPACING are skipped)
--- recorder:finish() -> id or nil, reason (simplified, stored); recorder:cancel()
-function WailaPathStore.newRecorder(options)
-    options = options or {}
-    local recorder = { points = {}, options = options, active = true }
-
-    function recorder:addPoint(x, z)
-        if not self.active then
-            return false
-        end
-        local last = self.points[#self.points]
-        if last ~= nil then
-            local dx, dz = x - last[1], z - last[2]
-            if dx * dx + dz * dz < WailaPathStore.RECORD_SPACING ^ 2 then
-                return false
-            end
-        end
-        self.points[#self.points + 1] = { x, z }
-        return true
-    end
-
-    function recorder:getPoints()
-        return self.points
-    end
-
-    function recorder:getLength()
-        return WailaPathStore.length(self.points)
-    end
-
-    function recorder:cancel()
-        self.active = false
-        self.points = {}
-    end
-
-    function recorder:finish()
-        self.active = false
-        if WailaPathStore.length(self.points) < WailaPathStore.MIN_RECORDED_LENGTH then
-            return nil, "too short"
-        end
-        local simplified = WailaPathStore.simplify(self.points, WailaPathStore.SIMPLIFY_TOLERANCE)
-        local id, reason = WailaPathStore.add({
-            points = simplified,
-            kind = self.options.kind or "recorded",
-            source = self.options.source,
-            name = self.options.name,
-            width = self.options.width,
-            oneWay = self.options.oneWay ~= false,
-        })
-        if id ~= nil then
-            log("recorded path %d: %d point(s) kept of %d, %.0f m", id, #simplified, #self.points, WailaPathStore.length(simplified))
-        end
-        return id, reason
-    end
-
-    return recorder
 end
 
 -- ===== file =====
