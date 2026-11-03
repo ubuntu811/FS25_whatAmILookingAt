@@ -222,7 +222,25 @@ function allTarget:onAllOverlap(nodeId)
             end
         end
     end
-    table.insert(self.hits, string.format("%s %s <- %s [group 0x%X]", tostring(nodeId), name, parentName, group))
+    -- how tall it is, what it is made of: a standing tree is many metres, a stump (the lower part of a cut tree's own split shape) about one, and the tree type says what it was
+    local height, species, body = "?", "?", "?"
+    local okBox, minX, maxX, minY, maxY = pcall(getRigidBodyAABB, nodeId)
+    if okBox and minY ~= nil and maxY ~= nil then
+        height = string.format("%.1f", maxY - minY)
+    end
+    local okType, splitType = pcall(getSplitType, nodeId)
+    if okType and splitType ~= nil and splitType ~= 0 then
+        species = tostring(splitType)
+        local desc = g_treePlantManager ~= nil and g_treePlantManager.getTreeTypeDescFromSplitType ~= nil and g_treePlantManager:getTreeTypeDescFromSplitType(splitType) or nil
+        if desc ~= nil then
+            species = tostring(desc.name)
+        end
+    end
+    local okBody, bodyType = pcall(getRigidBodyType, nodeId)
+    if okBody and bodyType ~= nil then
+        body = tostring(bodyType)
+    end
+    table.insert(self.hits, string.format("%s %s <- %s [group 0x%X] %s m tall, split type %s, rigid body %s", tostring(nodeId), name, parentName, group, height, species, body))
     return false
 end
 
