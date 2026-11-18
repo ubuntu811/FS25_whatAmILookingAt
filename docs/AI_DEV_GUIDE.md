@@ -1,0 +1,144 @@
+# AI-assisted FS25 modding — dev environment guide
+
+How this repo (and its companion [FS25_whatAmILookingAt](https://github.com/ubuntu811/FS25_whatAmILookingAt)) actually get built, tested, and debugged, for anyone — human or AI — starting from zero. Written from an actual working setup, not a hypothetical one. Prefer this over prose explanations elsewhere: every claim below is a command you can run.
+
+**If you're starting a new FS25 mod with an AI coding assistant, point it at this repo** (this file plus `docs/engine-api/`) before it starts guessing. It turns weeks of confirmed trial-and-error - what actually works, what silently doesn't, which native functions are real versus plausible-sounding hallucinations - into day-one starting context, instead of your AI re-discovering the same WSL gotchas and wrong API guesses from scratch.
+
+## 1. The environment
+
+- **Windows + Steam**: Farming Simulator 25 installed normally via Steam.
+- **WSL2** (Ubuntu) on the same machine, with the Windows C: drive mounted at `/mnt/c`.
+- **Three different folders, do not confuse them** - this setup symlinks
+  all three into the WSL home directory:
+  - Game **install** (read-only reference material): `~/fs25_bin` →
+    `/mnt/c/Program Files (x86)/Steam/steamapps/common/Farming Simulator 25/`
+    - binaries, `sdk/debugger/scriptBinding.xml` (every Lua-callable
+      native), `shared/xml/schema/*.xsd` (modDesc.xsd, mission00.xsd, etc.).
+  - Game **user data** (mods, saves, logs, settings): `~/fs25` →
+    `/mnt/c/Users/<you>/Documents/My Games/FarmingSimulator2025/` -
+    `savegameN/`, installed `mods/`, `modSettings/`, `log.txt`.
+  - Dev **tools/references** (GIANTS Texture Tool, decompilers, PDFs,
+    anything NOT the game itself): `~/fs25_resources` →
+    `/mnt/c/Users/<you>/Documents/fs25_resources/`. Deliberately excludes
+    GIANTS Editor - that stays wherever it's installed
+    (`/mnt/c/Program Files/GIANTS Software/GIANTS_Editor_<version>/`),
+    it's a Windows GUI app, nothing to consolidate.
+- **Claude Code** is installed on Windows, not inside WSL - there's no `apt install claude-code`. It gets WSL filesystem/shell access through Claude Code's own WSL integration setting (an explicit opt-in, not automatic). With that enabled, it edits files under `~/my_mods/<ModName>/` (a git repo per mod), building, and deploying straight into `~/fs25/mods/<ModName>/` as a loose unzipped folder for FS25's hot-reload.
+
+Finding the install path the first time: don't blind-`find` all of `/mnt/c` (WSL↔Windows crossing is slow, real timeouts happen). Target a known filename instead:
+
+```bash
+find / -iname "mission00.xsd" 2>/dev/null
+```
+
+## 2. Toolchain
+
+FS25's scripting engine is **Lua 5.1**. Ubuntu/WSL usually only has `lua5.4` preinstalled — its `luac5.4 -p` will happily accept Lua 5.2+-only syntax (`goto`/labels) that the real game engine rejects at load time with a cryptic in-game compiler error. Install the right version:
+
+```bash
+sudo apt-get install -y lua5.1
+```
+
+Then point build scripts at `luac5.1 -p`, not `luac5.4`.
+
+**GIANTS Texture Tool** (PNG → DDS) runs fine straight from WSL — no `powershell.exe` wrapper
+needed. WSL interop runs Windows `.exe` binaries directly as long as it's enabled (default; check
+`cat /proc/sys/fs/binfmt_misc/WSLInterop` says `enabled`) — the actual gotcha people hit is going
+through `powershell.exe -Command` first (path/quoting pain) instead of just running the `.exe`
+directly from a WSL shell. **Use textureTool, not imagemagick, for every DDS shipped in a mod**
+(icons included) — an imagemagick-built DDS loads but triggers an in-game quality warning.
+
+Full resize→convert workflow, real confirmed commands, current tool path, and the srgb-default
+gotcha: see [`icon_pipeline.md`](icon_pipeline.md).
+
+## 3. Repo layout convention
+
+Every mod repo has:
+
+```
+modDesc.xml
+scripts/
+l10n/
+icon*.dds
+build/
+  build.sh     # compile-check + XML-validate + zip
+  deploy.sh    # unzip build.sh's output into ~/fs25/mods/<ModName>/
+```
+
+`build.sh` (this repo's, condensed):
+
+```bash
+find . -name '*.lua' -print0 | xargs -0 -n1 luac5.1 -p
+find . -name '*.xml' -print0 | xargs -0 -n1 python3 -c \
+  'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])'
+# ...then copies scripts/, l10n/, modDesc.xml, icon into a staging dir and zips it
+```
+
+The XML check exists because a single stray/duplicate closing tag in `modDesc.xml` will pass every Lua check and still hard-fail the game load (`XML_ERROR_MISMATCHED_ELEMENT`) — this bit us for real, once.
+
+`deploy.sh` always runs `build.sh` first (unconditionally, not "if the zip is missing" — that conditional version silently redeployed a stale pre-session zip for an entire session once, since a zip already existed on disk and it never re-ran `build.sh`), then `rm -rf` + `unzip` the zip straight into `~/fs25/mods/<ModName>/` as a loose folder (not a zip) so FS25 hot-reloads it without a repackage step every time.
+
+This `rm -rf`+`unzip`/`cp -r` pattern is fine for small script mods like this one (a handful of `.lua`/`.xml` files, nothing to really feel). It does **not** scale to map mods — a map repo can be 1+ GB (terrain textures, i3d assets), and WSL↔Windows filesystem crossing (`/mnt/c`) is slow enough that a full `rm -rf`+`unzip`/`cp -r` on every single edit becomes genuinely painful. For those, swap to `rsync -a --delete` for both the staging copy and the final deploy — only touches what actually changed, instead of blowing away and recopying gigabytes to fix one XML attribute.
+
+**Workflow rule**: after every code edit, run both — don't wait to be asked. In-game testing is the only real verification; local syntax checks only catch a subset of what can go wrong.
+
+## 4. Authoritative references — check these before guessing
+
+The game ships real, unpacked reference material. Use it instead of inferring behavior from trial-and-error or decompiled snippets:
+
+- **XML schemas** (map.xml, modDesc.xml, vehicle XML, etc.): `<install>/shared/xml/schema/*.xsd` — e.g. `mission00.xsd` is the authoritative map.xml structure.
+- **Every Lua-callable engine function**, with real params/types: `<install>/sdk/debugger/scriptBinding.xml`.
+- **Real, currently-installed reference mods**: when unsure whether a pattern is genuinely supported, grep an existing working mod's actual source rather than guessing (e.g. `FS25_AdditionalContracts`'s own `InGameMenu.onMenuOpened` hook confirmed the real settings-page injection point after a first guess, `BaseMission.loadMapFinished`, silently rendered nothing).
+- **When even scriptBinding.xml doesn't have it**: `~/my_mods/fs-utils` (a
+  Rust CLI toolkit, not prebuilt - `cargo build --release -p <tool>`
+  first) can unpack `.gar`/`.dlc` archives (`fs-unpack`) and decompile the
+  base game's own Lua/Luau bytecode straight out of them
+  (`fs-luau-decompile dataS.gar/scripts/... `) - useful for classes like
+  `SavegameController` that are pure Lua, not native engine bindings, so
+  they never appear in scriptBinding.xml at all.
+
+## 5. The debug-loop pattern
+
+WAILA (`FS25_whatAmILookingAt`) exists specifically to make "what field do I actually need to check" answerable at runtime instead of by guessing:
+
+1. Add a temporary field dump to `WailaDebugDump.lua` bound to a debug key (e.g. `Shift+J`).
+2. Reproduce the in-game situation.
+3. Read the real log output (`~/fs25/log.txt`) — real field names, real values, real nesting — instead of assuming from decompiled Lua or forum posts.
+4. Wire the confirmed-real field into actual mod logic; leave (or remove) the dump.
+
+This is how `spec_sowingMachine.isWorking` was found as the real "is this seeder actively working" signal, after three wrong guesses (`getIsTurnedOn()`, `getIsLowered()`, the towing vehicle's engine state) that were each individually plausible and each individually wrong.
+
+**Step 3 in practice**: the game writes its live log straight to `~/fs25/log.txt` (real path, not a guess — confirmed by grepping it all session). `print()`/`debugPrint()` calls from any loaded mod land there in real time while the game runs, so a `grep`/`tail` from WSL reads what just happened in-game without needing to alt-tab or touch the game's own log viewer:
+
+```bash
+grep "\[TestRig\]" ~/fs25/log.txt | tail -50      # everything a specific tagged debug print logged
+tail -n 50 ~/fs25/log.txt                         # re-run this after each in-game action instead
+```
+
+`tail -f` does **not** reliably work here - `~/fs25/log.txt` resolves through `/mnt/c` (a native Windows process writing to a DrvFs-mounted path), and WSL's `/mnt/c` mount doesn't reliably propagate Windows-side file changes into Linux inotify events, which `-f` depends on. Confirmed broken in practice, not a theoretical concern. The pattern that actually works all session: reproduce the in-game action, then re-run a fresh `tail`/`grep`, rather than trying to follow the file live.
+
+No special access, no in-game console needed — it's a plain text file the whole time, sitting on the Windows-visible filesystem like everything else under `~/fs25/`.
+
+## 6. Concrete gotchas hit building this mod pair
+
+One-liners, cause → fix, most expensive first:
+
+- **`Utils.appendedFunction` doesn't forward return values.** Hooking `SowingMachine.processSowingMachineArea` this way broke real gameplay (`WorkArea.lua:278: attempt to compare number < nil`) because the engine's own update loop depends on that function's return value. Fix: don't hook functions whose return value the engine consumes; hook a side-effect-only function instead (`WheelDestruction.update` here).
+- **`category="ONFOOT"`/`"VEHICLE"` on a `modDesc.xml` `<action>`** silently deactivates that keybind by context at the engine level, regardless of how carefully you manage registration in Lua. Omit the attribute if you want manual control.
+- **Lua 5.1 vs 5.4** — see §2. A build that passes local syntax checks can still fail to load in-game.
+- **`git clone` silently drops empty directories.** `build.sh`'s `l10n/` (empty in both this repo and IW - all `<l10n>` text lives inline in `modDesc.xml`) only ever worked locally, where the leftover empty folder still physically exists on disk. A truly fresh checkout never has it, so an unconditional `cp -r l10n/` fails there — first caught by this repo's own CI running a real fresh clone for the first time. Fix: existence-check every entry in the copy loop (`if [ -e "$i" ]`) instead of assuming it's there.
+- **`getRootVehicle()` on an arbitrary hit object** resolves all the way up to the root (e.g. the towing tractor) even when the object itself is already the vehicle you care about. Check `object.isVehicle`/`object:isa(Vehicle)` first.
+- **Collision-mask raycasts that include `"VEHICLE"`** and fire from at/near the player's own vehicle will always hit that vehicle first, silently breaking every check downstream. Easy to add for a plausible reason (exclude structures) and not notice the regression until "it just stopped working."
+- **`<mapping name=".." layerName=".." state="..">` in map.xml is not optional.** `applyDecoFoliage`/`getIsDecoLayerDefined` only accept names with an explicit `<mapping>` entry — a raw, genuinely-declared `<decoFoliage layerName="...">` name alone does **not** work. Confirmed by live A/B log testing: 9 "obviously real" raw layer names all returned `false`; 4 newly-added custom `<mapping>` entries all returned `true`.
+- **`addFoliageTypeFromXML`** (scriptBinding.xml, category `Foliage`) registers a brand-new decorative foliage layer at runtime, independent of what a map declares — likely the actual primitive behind mods like `FS25_allTheFoliage`. It is **not** connected to the fruit-type/growth system (e.g. real "meadow" growth stages) — purely decorative, same tier as any `decoFoliage` layer.
+- **A community UI helper class (`UIHelper`) is not a base-game class.** Two independently-installed mods can each vendor their own copy of the same global table name; guard vendored copies with `if UIHelper == nil then ... end` so load order doesn't cause one to silently clobber the other.
+- **Settings-page injection must happen from `InGameMenu.onMenuOpened`**, not `BaseMission.loadMapFinished` — the latter fires before the settings page's GUI elements reliably exist.
+
+## 7. Where to actually start, from zero
+
+1. Install FS25 via Steam, run it once so user-data folders exist.
+2. Set up WSL2 + a distro, confirm `/mnt/c` is mounted.
+3. `sudo apt-get install -y lua5.1 unzip zip python3`.
+4. Find the install path (§1), skim `shared/xml/schema/mission00.xsd` and `sdk/debugger/scriptBinding.xml` once, just to know they exist.
+5. Copy this repo's `build/build.sh` + `build/deploy.sh` pattern for a new mod skeleton (`modDesc.xml`, `scripts/`, `l10n/`).
+6. Build a tiny debug-dump keybind first, before writing real mechanics — it pays for itself immediately the first time an assumption about a field name turns out wrong.

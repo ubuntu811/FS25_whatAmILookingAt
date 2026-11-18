@@ -1,0 +1,7 @@
+build/.build_staging/
+chatgpt/
+claude/
+build/*.zip
+*.swp
+__pycache__/
+luac.out

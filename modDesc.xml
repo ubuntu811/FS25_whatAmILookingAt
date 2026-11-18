@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<modDesc descVersion="93">
+    <author>ubuntu811</author>
+    <version>1.2.0.0</version>
+    <title>
+        <en>What Am I Looking At?</en>
+        <de>What Am I Looking At?</de>
+    </title>
+    <description>
+        <en>Developer HUD for inspecting terrain, foliage, vehicles, trees, logs and physics objects.</en>
+        <de>Entwickler-HUD zum Untersuchen von Terrain, Bewuchs, Fahrzeugen, Bäumen, Stämmen und Physikobjekten.</de>
+    </description>
+    <multiplayer supported="true"/>
+
+    <iconFilename>icon.dds</iconFilename>
+
+    <extraSourceFiles>
+        <sourceFile filename="scripts/WailaUtil.lua" />
+        <sourceFile filename="scripts/WailaConfig.lua" />
+        <sourceFile filename="scripts/WailaRaycaster.lua" />
+        <sourceFile filename="scripts/WailaJobDefinitions.lua" />
+        <sourceFile filename="scripts/classes/WailaField.lua" />
+        <sourceFile filename="scripts/classes/WailaTerrain.lua" />
+        <sourceFile filename="scripts/classes/WailaTerrainArea.lua" />
+        <sourceFile filename="scripts/classes/WailaObject.lua" />
+        <sourceFile filename="scripts/classes/WailaVehicle.lua" />
+        <sourceFile filename="scripts/classes/WailaFoliageHit.lua" />
+        <sourceFile filename="scripts/classes/WailaFoliageArea.lua" />
+        <sourceFile filename="scripts/classes/WailaDeclaredArea.lua" />
+        <sourceFile filename="scripts/inspectors/WailaTerrainInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaFoliageInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaObjectInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaVehicleInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaAnimalInspector.lua" />
+        <sourceFile filename="scripts/inspectors/WailaFieldInspector.lua" />
+        <sourceFile filename="scripts/WailaFieldGridScanner.lua" />
+        <sourceFile filename="scripts/WailaFieldBoundaryTracer.lua" />
+        <sourceFile filename="scripts/WailaMapSettings.lua" />
+        <sourceFile filename="scripts/WailaMapLayersTab.lua" />
+        <sourceFile filename="scripts/WailaPathStore.lua" />
+        <sourceFile filename="scripts/WailaTrailTracer.lua" />
+        <sourceFile filename="scripts/WailaLayerScan.lua" />
+        <sourceFile filename="scripts/WailaFieldIndex.lua" />
+        <sourceFile filename="scripts/WailaAreaIndex.lua" />
+        <sourceFile filename="scripts/WailaAreaTracker.lua" />
+        <sourceFile filename="scripts/Waila.lua" />
+        <sourceFile filename="scripts/WailaDebugDump.lua" />
+        <sourceFile filename="scripts/WailaDebugTools.lua" />
+        <sourceFile filename="scripts/WailaHud.lua" />
+        <sourceFile filename="scripts/WailaDebugHubDialog.lua" />
+        <sourceFile filename="scripts/FS25WhatAmILookingAt.lua" />
+        <sourceFile filename="scripts/PlaceableWailaTestRig.lua" />
+    </extraSourceFiles>
+
+    <!-- Same shape Daisychain's own daisychainFlowerPatch type uses:
+         bare placeable, hand-picked specialization list. Standard
+         "placement" specialization only (no custom brush needed, see
+         xml/testRigPlaceable.xml's own comment; this is plain
+         point+rotation, which the engine's construction flow already
+         handles natively). -->
+    <placeableTypes>
+        <type name="wailaFoliageTestRig" parent="placeable" filename="$dataS/scripts/placeables/Placeable.lua">
+            <specialization name="placement"/>
+            <specialization name="wailaFoliageTestRig"/>
+        </type>
+    </placeableTypes>
+
+    <placeableSpecializations>
+        <specialization name="wailaFoliageTestRig" className="PlaceableWailaTestRig" filename="scripts/PlaceableWailaTestRig.lua"/>
+    </placeableSpecializations>
+
+    <storeItems>
+        <storeItem xmlFilename="xml/testRigPlaceable.xml"/>
+    </storeItems>
+
+    <actions>
+        <!-- No category attribute: category="ONFOOT" made the engine
+             auto-deactivate these while in a vehicle, regardless of how
+             they were registered in Lua. We manage activation/visibility
+             ourselves via the global PlayerInputComponent hook, so these
+             should work identically on foot or in any vehicle. -->
+        <action name="WAILA_TOGGLE_HUD" axisType="HALF"/>
+        <action name="WAILA_DUMP_TARGET" axisType="HALF"/>
+        <!-- Opens WailaDebugHubDialog: one shared tabbed screen for
+             throwaway/investigation debug tools and declared-area
+             management, replacing what used to be two separate binds
+             (a debug-menu OptionDialog and a standalone area list). Other
+             mods can add their own tab via Waila.registerDebugTab instead
+             of taking their own keybind. See gui/WailaDebugHubDialog.xml.
+             Also now the only way to dump the foliage catalog or run a
+             declared area's own action (Foliage tab / Declared Areas tab
+             respectively); those used to have their own dedicated
+             keybinds (WAILA_DUMP_FOLIAGE_CATALOG, WAILA_AREA_ACTION),
+             both removed as pure duplicates once the hub covered the
+             same actions with no loss of function. -->
+        <action name="WAILA_DEBUG_HUB" axisType="HALF"/>
+    </actions>
+
+    <inputBinding>
+        <actionBinding action="WAILA_TOGGLE_HUD">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_m" index="1" />
+        </actionBinding>
+        <actionBinding action="WAILA_DUMP_TARGET">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_j" index="1" />
+        </actionBinding>
+        <actionBinding action="WAILA_DEBUG_HUB">
+            <binding device="KB_MOUSE_DEFAULT" input="KEY_lshift KEY_l" index="1" />
+        </actionBinding>
+    </inputBinding>
+
+    <l10n>
+        <text name="input_WAILA_TOGGLE_HUD">
+            <en>Toggle world inspector</en>
+            <de>Weltinspektor umschalten</de>
+        </text>
+        <text name="input_WAILA_DUMP_TARGET">
+            <en>Dump inspected target</en>
+            <de>Untersuchtes Ziel ausgeben</de>
+        </text>
+        <text name="input_WAILA_DEBUG_HUB">
+            <en>Open WAILA debug hub</en>
+            <de>WAILA-Debug-Hub öffnen</de>
+        </text>
+        <text name="storeItem_title_wailaFoliageTestRig">
+            <en>Foliage Test Rig</en>
+            <de>Bewuchs-Testaufbau</de>
+        </text>
+    </l10n>
+</modDesc>

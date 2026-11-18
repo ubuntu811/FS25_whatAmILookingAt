@@ -1,0 +1,410 @@
+--[[
+    Waila.lua
+
+    Public query facade other mods call into -- Waila.get(type, x, z) /
+    Waila.getAll(type). Deliberately thin: just dispatches by type name to
+    whichever index registered itself (Waila.indices[type] = ...).
+
+    IMPORTANT: this table (Waila = {}, a mod-declared global) is NOT
+    actually visible to other mods' scripts, despite looking like a plain
+    shared global. Confirmed live, twice now, the hard way: WailaHud's
+    docking coordinates hit this earlier this session (a bare WailaHud
+    global read as nil from ImmersiveWeathering's side), and this file
+    hit it again when SmartMinimapAuto tried to read a bare `Waila`
+    global directly and got nil despite WAILA having already finished
+    loading. Each mod gets its own script environment for mod-DECLARED
+    globals -- only pre-existing engine objects (g_currentMission and
+    whatever's already hanging off it, base-game classes like
+    SavegameController/BaseMission that mods patch via Utils.
+    appendedFunction, ...) are actually shared across mods. The fix both
+    times: publish through g_currentMission (see
+    FS25WhatAmILookingAt:loadMap(), g_currentMission.waila = Waila) --
+    other mods read g_currentMission.waila, never this bare global
+    directly. events.vehicleLeftField exists for the exact same reason --
+    WailaFieldIndex.VEHICLE_LEFT_FIELD (a plain number from
+    nextMessageTypeId()) is just as invisible cross-mod as the table
+    itself would be, so it's re-exposed here too.
+
+    "field" is WAILA's own purpose-built index (see WailaFieldIndex.lua).
+    Any other type name is available for any mod to declare freely via
+    Waila.registerArea below -- WailaAreaIndex.new(type) gets created on
+    demand the first time that type name is registered, no core change
+    needed per new type. getTypes(x, z) is the reverse lookup: given a
+    position, which registered type names (WAILA's own or third-party)
+    cover it -- a list, not a single value, since e.g. a flower patch can
+    sit inside a field and both are simultaneously true.
+]]
+
+Waila = {}
+Waila.indices = {}
+Waila.events = {
+    vehicleLeftField = WailaFieldIndex.VEHICLE_LEFT_FIELD,
+    areaEntered = WailaAreaTracker.AREA_ENTERED,
+    areaLeft = WailaAreaTracker.AREA_LEFT,
+}
+
+-- Gates both the in-world field-boundary/label debug overlay
+-- (FS25WhatAmILookingAt:update()) and WailaFieldGridScanner's verbose
+-- per-seed/per-trace logging -- default off, toggled via the debug menu
+-- ("Toggle field-tracing debug view"). Was unconditional while chasing a
+-- real live bug in the boundary tracer; now that it's fixed, both are
+-- occasional-use diagnostics, not something that should run by default.
+Waila.debugFieldTracing = false
+
+-- One switch for chatty debug logging across WAILA and every mod that asks
+-- (other mods call g_currentMission.waila.isDebugLogEnabled(); see WailaConfig.lua).
+function Waila.isDebugLogEnabled()
+    return WailaConfig.isDebugLog()
+end
+
+-- Monotonic within this process, combined with getTimeSec() (real,
+-- already used elsewhere in this codebase, e.g. FS25WhatAmILookingAt's
+-- own scan timing) so ids stay unique even across separate game
+-- sessions/savegames reusing the same counter start -- doesn't need to
+-- be a true UUID, just never collide with anything already sitting in
+-- waila.xml or created earlier this session.
+Waila.nextAreaId = 0
+
+function Waila.generateAreaId(typeName)
+    Waila.nextAreaId = Waila.nextAreaId + 1
+    return string.format("%s_%d_%d", tostring(typeName), math.floor(getTimeSec() * 1000), Waila.nextAreaId)
+end
+
+-- Takes a plain { type, polygon/box, metadata, wailaID } data table --
+-- same shape WailaDeclaredArea.new expects -- builds the real instance,
+-- and registers it under Waila.indices[area.type], creating that type's
+-- WailaAreaIndex the first time it's seen. Refuses (logs, does not
+-- crash) if that type name is already owned by a non-declared-area
+-- index (WAILA's own "field", or another mod's custom index class) --
+-- registerArea is only for the plain-declared-area path, not a generic
+-- way to inject into someone else's purpose-built index.
+--
+-- wailaID is optional -- a fresh one is generated if not supplied (the
+-- normal case: a mod placing a brand-new area). Restoring an area from
+-- waila.xml passes the id IT was originally saved with (see
+-- WailaFieldIndex:loadFromXML), so re-restoring the same persisted area
+-- twice (e.g. two Waila.reloadAll() cycles re-running loadFromXML) lands
+-- on the SAME id both times -- WailaAreaIndex:add then upserts instead
+-- of appending a duplicate.
+function Waila.registerArea(data)
+    local index = Waila.indices[data.type]
+    if index == nil then
+        index = WailaAreaIndex.new(data.type)
+        Waila.indices[data.type] = index
+    elseif index.className ~= WailaAreaIndex.MARKER then
+        Logging.warning("[WhatAmILookingAt] Waila.registerArea: type '%s' is already owned by a different index, refusing to register", tostring(data.type))
+        return nil
+    end
+    data.wailaID = data.wailaID or Waila.generateAreaId(data.type)
+    local area = WailaDeclaredArea.new(data)
+    index:add(area)
+    return area
+end
+
+function Waila.unregisterArea(area)
+    local index = Waila.indices[area.type]
+    if index ~= nil and index.className == WailaAreaIndex.MARKER then
+        index:remove(area)
+    end
+end
+
+-- Registered ONCE per area TYPE (not per instance) -- an area restored
+-- from waila.xml never carries function-valued fields (actionCallback/
+-- deleteCallback/etc.), since functions have no XML representation, but
+-- its area.type string survives the round-trip fine. Looking callbacks
+-- up by type instead of expecting them to live on the instance means a
+-- restored area resolves correctly too, not just a freshly-placed one --
+-- confirmed live: deleting a waila.xml-restored foliage test rig removed
+-- WAILA's own tracking but left the actual placed foliage in the world,
+-- because the per-instance deleteCallback it would have needed was
+-- never there to begin with on a restored instance.
+Waila.areaTypeCallbacks = {}
+
+function Waila.registerAreaType(typeName, callbacks)
+    Waila.areaTypeCallbacks[typeName] = callbacks
+end
+
+-- Prefers the area instance's own field (simplest for a mod whose areas
+-- are never persisted/restored) but falls back to the type-level
+-- registration above when the instance doesn't have one -- covers both
+-- a freshly-placed area and one restored from waila.xml with the same
+-- lookup.
+function Waila.resolveAreaField(area, fieldName)
+    if area[fieldName] ~= nil then
+        return area[fieldName]
+    end
+    local typeCallbacks = Waila.areaTypeCallbacks[area.type]
+    return typeCallbacks ~= nil and typeCallbacks[fieldName] or nil
+end
+
+-- Every registered type name whose index reports something at (x, z) --
+-- loops all of Waila.indices, not just declared areas, so WAILA's own
+-- "field" falls out of the same loop for free. Point-query cost only
+-- (HUD display, "what's here"), never called from a sweep/scan -- see
+-- WailaDeclaredArea.lua for why declared areas don't participate in
+-- blob-merging the way rice-field polygons do.
+-- Every currently-registered declared area across all types, flattened --
+-- shared by drawDebugAreas below and WailaDebugHubDialog's "Declared
+-- Areas" tab, so this loop only lives in one place (used to be
+-- duplicated in both plus the old WailaAreaListDialog).
+function Waila.getAllAreas()
+    local areas = {}
+    for _, index in pairs(Waila.indices) do
+        if index.className == WailaAreaIndex.MARKER then
+            for _, area in ipairs(index:getAll()) do
+                table.insert(areas, area)
+            end
+        end
+    end
+    return areas
+end
+
+function Waila.getTypes(x, z)
+    local types = {}
+    for typeName, index in pairs(Waila.indices) do
+        if index:get(x, z) ~= nil then
+            table.insert(types, typeName)
+        end
+    end
+    return types
+end
+
+-- Debug-only: draws every registered declared area's boundary (blue by
+-- default) -- call every frame from update(), same immediate-mode
+-- constraint as WailaDeclaredArea:drawDebug itself. Only visits
+-- WailaAreaIndex-backed types, not WAILA's own "field" -- that already has
+-- its own (much heavier, flood-fill-derived) visualization story if one
+-- ever gets built, not this one.
+function Waila.drawDebugAreas(r, g, b)
+    r = r or 0.2
+    g = g or 0.4
+    b = b or 1
+
+    for _, area in ipairs(Waila.getAllAreas()) do
+        area:drawDebug(r, g, b)
+    end
+end
+
+-- Shared debug/tools hub -- WailaDebugHubDialog.lua reads this list to
+-- build its tab strip. Any mod (WAILA itself included -- see
+-- FS25WhatAmILookingAt:loadMap, it registers its own tabs through this
+-- exact same call, no special-casing for being the "owner") can add one.
+-- Deliberately unopinionated about what's INSIDE getItems()'s results --
+-- WailaDebugHubDialog only ever hands an item back through this same
+-- descriptor's own describeItem/buttons callbacks, never inspects an
+-- item's fields itself.
+--
+-- descriptor = {
+--   id = "unique-string",
+--   label = "Shown in the topic list",
+--   icon = "optional, absolute path to a .dds (see Utils.getFilename)",
+--   getItems = function() return {...} end,        -- called fresh every open/refresh
+--   describeItem = function(item) return primaryText, secondaryText end,
+--   buttons = { { label = "...", callback = function(item) ... end }, ... },
+--   getItemLayer = function(item) return terrainLayerId end,   -- optional: the row shows that terrain layer's own texture (the game's TerrainLayer element) instead of the colour chip
+--   getItemPreview = function(item) return { cols = 8, rows = 8, layers = { terrainLayerId or false, ... } } end,   -- optional: a mosaic of 8 x 8 layer pictures for the row (an assembly of layers), row by row; wins over getItemLayer
+--   onBack = function() return true end,   -- optional: Back / ESC goes up one level inside the tab; return true when it did (the hub stays open), false at the top (the hub closes)
+--   onDoubleClick = function(item) ... end,   -- optional: a double click on a row (its default action); tabs without it ignore double clicks
+--   getButtons = function(item) return { { label, callback, instant, layerId = terrainLayerId }, ... } end,   -- layerId (optional): the layer's picture is shown left of the button   -- optional: the buttons of the SELECTED row (up to 11), instead of the fixed list
+-- }
+Waila.debugTabs = {}
+
+function Waila.registerDebugTab(descriptor)
+    table.insert(Waila.debugTabs, descriptor)
+end
+
+-- Reloads the rows and buttons of the open hub (a tab whose data changed outside a button click: a text dialog closed). keepIndex: the row to keep selected.
+function Waila.refreshDebugHub(keepIndex)
+    local hub = WailaDebugHubDialog ~= nil and WailaDebugHubDialog.instance or nil
+    if hub ~= nil and hub.refreshItems ~= nil then
+        hub:refreshItems(keepIndex)
+    end
+end
+
+-- Scan hooks: a mod that wants to do its own work for the area a layer scan covers (the whole map, or "rescan around me") registers a function here; it is called once when the scan starts with
+-- rect = { minX, maxX, minZ, maxZ } (nil: the whole map). Waila.registerScanHook(id, fn) replaces an earlier hook with the same id. Errors in a hook are caught and logged.
+Waila.scanHooks = {}
+
+function Waila.registerScanHook(id, fn)
+    if type(fn) ~= "function" then
+        return false
+    end
+    Waila.scanHooks[id] = fn
+    return true
+end
+
+function Waila.runScanHooks(rect)
+    for id, fn in pairs(Waila.scanHooks) do
+        local ok, err = pcall(fn, rect)
+        if not ok then
+            print(string.format("[WhatAmILookingAt] scan hook %s failed: %s", tostring(id), tostring(err)))
+        end
+    end
+end
+
+-- The entries of the action-style tabs (General / Terrain / Foliage / Field), by tab id: each entry { label | getLabel, run, instant } is a row whose Run button calls run(). Another mod adds a row
+-- to one of them (instead of a tab of its own) with Waila.addDebugAction(tabId, entry); entry.key (optional) replaces the row of an earlier call with the same key. Returns false when there is no such tab.
+Waila.actionEntries = {}
+
+function Waila.addDebugAction(tabId, entry)
+    local entries = Waila.actionEntries[tabId]
+    if entries == nil or type(entry) ~= "table" or type(entry.run) ~= "function" then
+        return false
+    end
+    if entry.key ~= nil then
+        for i = #entries, 1, -1 do
+            if entries[i].key == entry.key then
+                table.remove(entries, i)
+            end
+        end
+    end
+    table.insert(entries, entry)
+    return true
+end
+
+-- Same, keeping the row that is selected (for a mod whose work finishes some frames after the click: its row's text changes by itself).
+function Waila.refreshDebugHubKeepSelection()
+    local hub = WailaDebugHubDialog ~= nil and WailaDebugHubDialog.instance or nil
+    if hub ~= nil and hub.refreshItems ~= nil then
+        hub:refreshItems(hub.itemList ~= nil and hub.itemList.selectedIndex or nil)
+    end
+end
+
+-- Removes every tab matching id -- used by a module's own reload
+-- teardown (see Waila.registerReloadable below) so it can re-register
+-- its OWN tabs cleanly without wiping the shared list (which may hold
+-- other mods' tabs too).
+function Waila.unregisterDebugTab(id)
+    for i = #Waila.debugTabs, 1, -1 do
+        if Waila.debugTabs[i].id == id then
+            table.remove(Waila.debugTabs, i)
+        end
+    end
+end
+
+-- Shared "reload my scripts" registry -- see the wailaReload console
+-- command / General debug tab (FS25WhatAmILookingAt.lua). Any mod can
+-- register its own source files here to be re-source()'d together with
+-- WAILA's, through the exact same one command -- the whole point being
+-- not paying for a full savegame reload just to pick up a small script
+-- fix. WAILA registers itself through this same public API.
+--
+-- descriptor = {
+--   id = "unique-string",
+--   modDirectory = ".../ModFolder/",         -- this mod's own g_currentModDirectory
+--   sourceFiles = { "scripts/Foo.lua", ... }, -- relative to modDirectory
+--   teardown = function() ... end,  -- unregister everything this module owns
+--   setup = function() ... end,     -- recreate everything this module owns
+-- }
+--
+-- Deliberately best-effort, not a guaranteed-safe live reload: source()
+-- re-runs a file's top-level code, which for a class file means a FRESH
+-- metatable (via Class(...)) -- any already-created instance keeps
+-- pointing at the OLD one unless teardown/setup actually destroy and
+-- recreate it. Fine for typical logic/typo fixes in files whose objects
+-- get properly recreated; a structural change (new fields, a changed
+-- class hierarchy, ...) may still need a real reload. Not every case
+-- has to work for this to be worth having.
+Waila.reloadables = {}
+
+function Waila.registerReloadable(descriptor)
+    table.insert(Waila.reloadables, descriptor)
+end
+
+local function log(formatString, ...)
+    Logging.info("[WhatAmILookingAt] " .. formatString, ...)
+end
+
+-- Runs teardown for every registrant (reverse registration order, so a
+-- later/more-dependent module tears down before whatever it depends on),
+-- then re-source()'s every registrant's files (registration order), then
+-- runs setup for every registrant (registration order). Each step is
+-- individually pcall'd -- one module's teardown/source/setup failing
+-- doesn't stop the others from still getting reloaded.
+--
+-- Every step logs unconditionally, success included, not just failure --
+-- a registrant that silently no-ops (e.g. teardown/setup is nil, or a
+-- typo'd sourceFiles path that never matches anything) used to look
+-- identical to one that worked. "Did this actually run" needs to be
+-- answerable from the log without having to already suspect something's
+-- wrong.
+function Waila.reloadAll()
+    log("[Reload] Starting (%d registered module(s))...", #Waila.reloadables)
+
+    for i = #Waila.reloadables, 1, -1 do
+        local reloadable = Waila.reloadables[i]
+        if reloadable.teardown ~= nil then
+            local ok, err = pcall(reloadable.teardown)
+            if ok then
+                log("[Reload] '%s' teardown OK", tostring(reloadable.id))
+            else
+                log("[Reload] '%s' teardown failed: %s", tostring(reloadable.id), tostring(err))
+            end
+        else
+            log("[Reload] '%s' has no teardown, skipping", tostring(reloadable.id))
+        end
+    end
+
+    for _, reloadable in ipairs(Waila.reloadables) do
+        local fileCount = reloadable.sourceFiles ~= nil and #reloadable.sourceFiles or 0
+        log("[Reload] '%s': sourcing %d file(s)", tostring(reloadable.id), fileCount)
+        for _, relativePath in ipairs(reloadable.sourceFiles or {}) do
+            local path = Utils.getFilename(relativePath, reloadable.modDirectory)
+            local ok, err = pcall(source, path)
+            if ok then
+                log("[Reload] '%s': sourced %s OK", tostring(reloadable.id), relativePath)
+            else
+                log("[Reload] '%s': failed sourcing %s: %s", tostring(reloadable.id), relativePath, tostring(err))
+            end
+        end
+    end
+
+    for _, reloadable in ipairs(Waila.reloadables) do
+        if reloadable.setup ~= nil then
+            local ok, err = pcall(reloadable.setup)
+            if ok then
+                log("[Reload] '%s' setup OK", tostring(reloadable.id))
+            else
+                log("[Reload] '%s' setup failed: %s", tostring(reloadable.id), tostring(err))
+            end
+        else
+            log("[Reload] '%s' has no setup, skipping", tostring(reloadable.id))
+        end
+    end
+
+    log("[Reload] Done.")
+end
+
+function Waila.get(type, x, z)
+    local index = Waila.indices[type]
+    if index == nil then
+        return nil
+    end
+    return index:get(x, z)
+end
+
+-- Traces the field at (x, z) again from the ground as it is now, on request (no cooldown): the entry is replaced by the fresh outline, earlier entries lying completely inside it are merged into it, and
+-- Waila.events.vehicleLeftField fires with (nil, the new entry) when it is done (the entry is nil when the ground is no field any more). The trace is budgeted per tick like every other rescan. false when the
+-- field index is not there.
+function Waila.rescanField(x, z)
+    local index = Waila.indices.field
+    if index == nil or index.rescanBlobAt == nil or x == nil or z == nil then
+        return false
+    end
+    index:rescanBlobAt(nil, x, z, true)
+    return true
+end
+
+function Waila.getAll(type)
+    local index = Waila.indices[type]
+    if index == nil then
+        return nil
+    end
+    return index:getAll()
+end
+
+-- Optional default presentation for a WailaField job type -- see
+-- WailaJobDefinitions.lua for why this is offered rather than required.
+function Waila.getJobLetter(jobType)
+    return WailaJobDefinitions.getLetter(jobType)
+end

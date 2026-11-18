@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<placeable type="wailaFoliageTestRig" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <storeData>
+        <name>$l10n_storeItem_title_wailaFoliageTestRig</name>
+        <functions>
+            <function>$l10n_function_decoration</function>
+        </functions>
+        <image>gui/icons/testrig_store.dds</image>
+        <price>5</price>
+        <dailyUpkeep>0</dailyUpkeep>
+        <lifetime>1000</lifetime>
+        <rotation>0</rotation>
+        <brand>NONE</brand>
+        <species>PLACEABLE</species>
+        <category>decoration</category>
+        <!-- Standard "placeable" brush type, not a custom one; unlike
+             Daisychain's own flower patch, this only needs point +
+             rotation, which the engine's own construction placement
+             already handles natively (real, confirmed via toolShed02.xml
+             using the exact same bare "placeable" type for its own
+             standard point placement). No ConstructionBrush* class
+             needed at all. -->
+        <brush>
+            <type>placeable</type>
+            <category>decoration</category>
+            <tab>waila</tab>
+        </brush>
+        <canBeSold>true</canBeSold>
+        <showInStore>true</showInStore>
+        <filename>i3d/testRig.i3d</filename>
+    </storeData>
+
+    <base>
+        <filename>i3d/testRig.i3d</filename>
+    </base>
+</placeable>

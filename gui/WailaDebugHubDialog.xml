@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<GUI onOpen="onOpen" onClose="onClose">
+    <Bitmap profile="fs25_fullScreenBackground"/>
+
+    <!-- Left column: topics (registered debug tabs), same base-game
+         "hotspot filter" shape as the in-game map's own Hotspots menu
+         (VEHICLES/COMBINES/TRAILERS/... list on the left, content on the
+         right); unmodified fs25_subCategoryContainer defaults, exactly
+         what already rendered correctly, just re-pointed at topics
+         instead of items. Scales to any number of registered tabs via
+         its own scrollbar; no fixed slot count, no button-row crowding. -->
+    <GuiElement profile="fs25_subCategoryContainer" height="950px">
+        <Bitmap profile="fs25_subCategoryStartClipper" name="topicStartClipper"/>
+        <Bitmap profile="fs25_subCategoryStopClipper" name="topicEndClipper"/>
+        <SmoothList profile="fs25_subCategoryList" id="topicList" startClipperElementName="topicStartClipper" endClipperElementName="topicEndClipper">
+            <ListItem profile="fs25_subCategoryListItem">
+                <Bitmap profile="waila_hubTopicIcon" name="icon"/>
+                <Text profile="waila_hubTopicLabel" name="label"/>
+            </ListItem>
+        </SmoothList>
+        <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
+            <Slider profile="fs25_listSlider" dataElementId="topicList"/>
+        </ThreePartBitmap>
+    </GuiElement>
+
+    <!-- Right column: the selected topic's items; position/size lifted
+         directly from FS25_MapObjectsHider's own right-hand panel
+         (fs25_mohMapBox/fs25_mohCamBox in its mapObjectsHiderDialog.xml, a
+         real installed mod, not guessed), same emptyPanel +
+         anchorStretchingYLeft technique, same 450px x-offset (matches
+         where the topic list column ends). Same list/clipper/slider
+         pieces as the topic list, just nested in this panel instead;
+         wider than the old single narrow column, so labels like "Dump
+         inspected target" have more room before truncating. -->
+    <GuiElement profile="waila_hubDetailBox">
+        <Bitmap profile="fs25_subCategoryStartClipper" name="itemStartClipper"/>
+        <Bitmap profile="fs25_subCategoryStopClipper" name="itemEndClipper"/>
+        <SmoothList profile="fs25_subCategoryList" id="itemList" onDoubleClick="onItemDoubleClick" onClick="onItemClick" showHighlights="true" startClipperElementName="itemStartClipper" endClipperElementName="itemEndClipper">
+            <!-- Flat background (waila_hubFlatListItem), not
+                 fs25_subCategoryListItem: that profile's dark icon-box
+                 cap is baked into the gui.animalDealer_box atlas image
+                 itself, not adjustable via a size/position override, and
+                 with no icon here (unlike the topic list) it just reads as
+                 a big empty black block in this wider column. -->
+            <ListItem profile="waila_hubFlatListItem">
+                <Text profile="waila_hubItemPrimary" name="primary"/>
+                <Text profile="waila_hubItemSecondary" name="secondary"/>
+                <!-- colour chip, tinted per row in Lua (setImageColor) by tabs that define
+                     getItemColor (Map layers); hidden for every other tab -->
+                <Bitmap profile="waila_hubSwatch" name="swatch"/>
+                <!-- the picture of a terrain layer (the game's own TerrainLayer element, what the TerraFarm picker uses) in the chip's place, shown by tabs that define getItemLayer -->
+                <TerrainLayer profile="waila_hubTerrainPreview" name="terrain"/>
+                <!-- opacity meter under the chip: ten small segments, one per 10 percent, lit in
+                     Lua by tabs that define getItemMeter (Map layers) -->
+                <Bitmap profile="waila_hubMeterSegment" name="seg1" position="-74px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg2" position="-70px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg3" position="-66px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg4" position="-62px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg5" position="-58px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg6" position="-54px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg7" position="-50px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg8" position="-46px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg9" position="-42px -56px"/>
+                <Bitmap profile="waila_hubMeterSegment" name="seg10" position="-38px -56px"/>
+            </ListItem>
+        </SmoothList>
+        <ThreePartBitmap profile="fs25_subCategoryListSliderBox">
+            <Slider profile="fs25_listSlider" dataElementId="itemList"/>
+        </ThreePartBitmap>
+    </GuiElement>
+
+    <!-- Third column: the selected item's actions (tab.buttons); FIXED
+         BUTTON SLOTS, not a SmoothList. Confirmed live (real, repeated,
+         multi-test evidence): a SmoothList conflates "select" (move the
+         highlight) with "activate", and a genuine click on a
+         non-default row kept running whatever was PREVIOUSLY selected
+         instead of the clicked one; a real engine-level ambiguity in
+         click-vs-select semantics, not something fixable from this side
+         reliably. A plain Button's onClick has been rock solid all
+         session (Back, every earlier footer button) with none of that
+         ambiguity, and this list is always small/bounded (typically
+         1-4 actions per tab) unlike the genuinely open-ended topic
+         list, so a fixed-slot approach (same idea as the old footer,
+         just more headroom) is the right tool here, not a limitation.
+         Anchored from the RIGHT edge, same dual-panel technique
+         FS25_MapObjectsHider uses for its own two side-by-side preview
+         boxes. -->
+    <!-- The big picture of a row's terrain layer (the selected row), bottom right under the action buttons: tabs that define getItemLayer -->
+    <Bitmap profile="waila_hubPreviewFrame" id="previewFrame"/>
+    <TerrainLayer profile="waila_hubTerrainBig" id="terrainBig"/>
+    <!-- A picture from a file (a store icon of a plant) in the same place: tabs that define getItemImage -->
+    <Bitmap profile="waila_hubItemBackdrop" id="itemBackdrop"/>
+    <Bitmap profile="waila_hubItemImage" id="itemImage"/>
+
+    <!-- The preview of a whole assembly (a texture set): 8 x 8 cells of terrain layer pictures, bottom right, its left edge on the button labels, above the footer bar, in a light frame; tabs that define getItemPreview -->
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell1" position="-515px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell2" position="-495px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell3" position="-475px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell4" position="-455px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell5" position="-435px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell6" position="-415px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell7" position="-395px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell8" position="-375px 200px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell9" position="-515px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell10" position="-495px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell11" position="-475px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell12" position="-455px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell13" position="-435px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell14" position="-415px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell15" position="-395px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell16" position="-375px 180px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell17" position="-515px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell18" position="-495px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell19" position="-475px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell20" position="-455px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell21" position="-435px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell22" position="-415px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell23" position="-395px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell24" position="-375px 160px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell25" position="-515px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell26" position="-495px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell27" position="-475px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell28" position="-455px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell29" position="-435px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell30" position="-415px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell31" position="-395px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell32" position="-375px 140px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell33" position="-515px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell34" position="-495px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell35" position="-475px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell36" position="-455px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell37" position="-435px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell38" position="-415px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell39" position="-395px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell40" position="-375px 120px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell41" position="-515px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell42" position="-495px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell43" position="-475px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell44" position="-455px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell45" position="-435px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell46" position="-415px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell47" position="-395px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell48" position="-375px 100px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell49" position="-515px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell50" position="-495px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell51" position="-475px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell52" position="-455px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell53" position="-435px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell54" position="-415px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell55" position="-395px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell56" position="-375px 80px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell57" position="-515px 60px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell58" position="-495px 60px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell59" position="-475px 60px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell60" position="-455px 60px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell61" position="-435px 60px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell62" position="-415px 60px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell63" position="-395px 60px"/>
+    <TerrainLayer profile="waila_hubTerrainCell" id="terrainCell64" position="-375px 60px"/>
+
+    <GuiElement profile="waila_hubActionsBox">
+        <Button profile="waila_hubActionButton" position="0px -10px" id="actionButton1" onClick="onClickAction1" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -54px" id="actionButton2" onClick="onClickAction2" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -98px" id="actionButton3" onClick="onClickAction3" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -142px" id="actionButton4" onClick="onClickAction4" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -186px" id="actionButton5" onClick="onClickAction5" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -230px" id="actionButton6" onClick="onClickAction6" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -274px" id="actionButton7" onClick="onClickAction7" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -318px" id="actionButton8" onClick="onClickAction8" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -362px" id="actionButton9" onClick="onClickAction9" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -406px" id="actionButton10" onClick="onClickAction10" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -450px" id="actionButton11" onClick="onClickAction11" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -494px" id="actionButton12" onClick="onClickAction12" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -538px" id="actionButton13" onClick="onClickAction13" text=""/>
+        <Button profile="waila_hubActionButton" position="0px -582px" id="actionButton14" onClick="onClickAction14" text=""/>
+        <!-- The picture of a terrain layer inside the left padding of a button, for buttons that carry a layerId (IW: the layers of a type) -->
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon1" position="6px -12px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon2" position="6px -56px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon3" position="6px -100px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon4" position="6px -144px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon5" position="6px -188px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon6" position="6px -232px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon7" position="6px -276px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon8" position="6px -320px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon9" position="6px -364px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon10" position="6px -408px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon11" position="6px -452px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon12" position="6px -496px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon13" position="6px -540px"/>
+        <TerrainLayer profile="waila_hubButtonIcon" id="buttonIcon14" position="6px -584px"/>
+        <!-- Opacity selector (base-game arrow selector, left arrow / value / right arrow), shown by
+             tabs that define getOpacity / setOpacity (Map layers), in the fourth button slot (44 px pitch: fourteen slots), as wide as the buttons, its title indented to where their labels start -->
+        <Text profile="waila_hubOpacityTitle" id="opacityTitle" position="53px -145px" text="OPACITY"/>
+        <MultiTextOption profile="waila_hubOpacityOption" id="opacityOption" onClick="onClickOpacityOption" position="0px -178px"/>
+    </GuiElement>
+
+    <BoxLayout profile="fs25_buttonBox" id="buttonsPanel">
+        <Button profile="buttonBack" onClick="onClickClose" text="$l10n_button_back"/>
+    </BoxLayout>
+
+    <GUIProfiles>
+        <!-- fs25_subCategoryListItemIcon is the real base-game icon-slot
+             profile for this exact row skin (guiProfiles.xml); default
+             size/position (anchorMiddleLeft, 66x65, 11px 8px) already
+             fits the dark icon-slot area of the shared list-item
+             background, no override needed. imageFilename set per-row
+             in Lua via BitmapElement:setImageFilename. -->
+        <Profile name="waila_hubTopicIcon" extends="fs25_subCategoryListItemIcon"/>
+        <Profile name="waila_hubTopicLabel" extends="fs25_textDarkHighlight" with="anchorBottomLeft">
+            <position value="100px 60px"/>
+            <textSize value="26px"/>
+            <textVerticalAlignment value="bottom"/>
+            <textColor value="$preset_fs25_colorMainHighlight"/>
+            <textFocusedColor value="$preset_fs25_colorMainLight"/>
+            <textHighlightedColor value="$preset_fs25_colorMainHighlight"/>
+        </Profile>
+        <!-- Plain flat fill, not the shop-style gui.animalDealer_box skin;
+             gui.colorPreset is a genuinely uniform-color slice (used
+             all over guiProfiles.xml for buttons/separators/plain boxes).
+             Selected fill uses the same bright green as everywhere else
+             selection shows in this dialog (fs25_colorMainHighlight,
+             matching the topic list's still-default gui.animalDealer_box
+             skin) rather than colorItemBgSelected (dark); the text
+             profiles here extend fs25_textDarkHighlight, which already
+             defines a DARK textSelectedColor by design, meant to pair
+             with a bright selected background; a dark selected fill was
+             dark-text-on-dark-background. -->
+        <Profile name="waila_hubFlatListItem" extends="baseReference" with="anchorTopStretchingX">
+            <height value="140px"/>
+            <imageSliceId value="gui.colorPreset"/>
+            <imageColor value="$preset_colorItemBgNormal"/>
+            <imageSelectedSliceId value="gui.colorPreset"/>
+            <imageSelectedColor value="$preset_fs25_colorMainHighlight"/>
+        </Profile>
+        <!-- textMaxNumLines="2" (wrap) plus a PERCENTAGE size together
+             reproduced a real stack overflow inside the engine's own
+             TextElement code on a clean load. Staying in single-line
+             truncate mode (no textMaxNumLines) here, but there's plenty
+             of unused row width, so just widening the text with a fixed
+             pixel size lets most labels fit on one line without
+             truncating at all; no wrap, so none of the crash-prone
+             code path is touched. -->
+        <Profile name="waila_hubItemPrimary" extends="fs25_textDarkHighlight" with="anchorBottomLeft">
+            <position value="30px 60px"/>
+            <size value="700px 60px"/>
+            <textSize value="26px"/>
+            <textVerticalAlignment value="bottom"/>
+            <textColor value="$preset_fs25_colorMainHighlight"/>
+            <textFocusedColor value="$preset_fs25_colorMainLight"/>
+            <textHighlightedColor value="$preset_fs25_colorMainHighlight"/>
+        </Profile>
+        <Profile name="waila_hubItemSecondary" extends="fs25_textDarkHighlight" with="anchorBottomRight">
+            <position value="-38px 30px"/>
+            <textAlignment value="right"/>
+        </Profile>
+        <Profile name="waila_hubOpacityTitle" extends="textDefault" with="anchorTopLeft">
+            <size value="90% 30px"/>
+            <textBold value="true"/>
+        </Profile>
+        <Profile name="waila_hubOpacityOption" extends="fs25_settingsMultiTextOption" with="anchorTopLeft">
+            <size value="90% 42px"/>
+            <wrap value="false"/>
+        </Profile>
+        <Profile name="waila_hubMeterSegment" extends="baseReference" with="anchorTopRight">
+            <size value="3px 5px"/>
+            <imageSliceId value="gui.colorPreset"/>
+            <imageColor value="0.22 0.22 0.22 1"/>
+        </Profile>
+        <Profile name="waila_hubSwatch" extends="baseReference" with="anchorTopRight">
+            <size value="40px 40px"/>
+            <position value="-38px -12px"/>
+            <imageSliceId value="gui.colorPreset"/>
+            <imageColor value="1 1 1 1"/>
+        </Profile>
+        <Profile name="waila_hubTerrainPreview" extends="baseReference" with="anchorTopRight">
+            <size value="40px 40px"/>
+            <position value="-38px -12px"/>
+        </Profile>
+        <Profile name="waila_hubButtonIcon" extends="baseReference" with="anchorTopLeft">
+            <size value="36px 36px"/>
+        </Profile>
+        <Profile name="waila_hubTerrainCell" extends="baseReference" with="anchorBottomRight">
+            <size value="20px 20px"/>
+        </Profile>
+        <Profile name="waila_hubPreviewFrame" extends="baseReference" with="anchorBottomRight">
+            <size value="168px 168px"/>
+            <position value="-371px 56px"/>
+            <imageSliceId value="gui.colorPreset"/>
+            <imageColor value="0.75 0.75 0.75 1"/>
+        </Profile>
+        <Profile name="waila_hubItemBackdrop" extends="waila_hubPreviewFrame">
+            <imageColor value="0 0 0 1"/>
+        </Profile>
+        <Profile name="waila_hubTerrainBig" extends="baseReference" with="anchorBottomRight">
+            <size value="160px 160px"/>
+            <position value="-375px 60px"/>
+        </Profile>
+        <Profile name="waila_hubItemImage" extends="baseReference" with="anchorBottomRight">
+            <size value="160px 160px"/>
+            <position value="-375px 60px"/>
+            <imageSize value="512 512"/>
+            <imageSliceId value="noSlice"/>
+        </Profile>
+        <Profile name="waila_hubDetailBox" extends="emptyPanel" with="anchorStretchingYLeft">
+            <size value="45% 950px"/>
+            <position value="450px 0px"/>
+        </Profile>
+        <Profile name="waila_hubActionsBox" extends="emptyPanel" with="anchorStretchingYRight">
+            <size value="20% 950px"/>
+            <position value="-206px 0px"/>
+        </Profile>
+        <!-- Extends fs25_wideButton directly, NOT buttonOK; confirmed
+             via decompiled ButtonElement.lua + guiProfiles.xml: buttonOK
+             bakes in inputAction="MENU_ACCEPT" on its OWN definition
+             (not inherited from fs25_wideButton), which registers a real
+             input-binding event in ButtonElement:onOpen(). Every button
+             using that profile independently subscribes to the SAME
+             shared Enter/confirm action; with multiple actionButtons
+             visible at once, pressing Enter fired ALL of them
+             simultaneously (confirmed live: "2 buttons executed from one
+             press", not a focus-sync issue at all; handleFocus only
+             governs mouse-hover highlight state, unrelated to this).
+             fs25_wideButton gives the same visual style with no
+             inputAction at all, so these are mouse-click-only by
+             construction, not by trying to suppress an inherited one. -->
+        <Profile name="waila_hubActionButton" extends="fs25_wideButton" with="anchorTopLeft">
+            <size value="90% 40px"/>
+        </Profile>
+    </GUIProfiles>
+</GUI>
